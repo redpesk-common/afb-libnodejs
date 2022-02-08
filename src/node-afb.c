@@ -1,5 +1,6 @@
+#define _GNU_SOURCE
 /*
- * Conoderight (C) 2015-2021 IoT.bzh Company
+ * Copyright (C) 2015-2021 IoT.bzh Company
  * Author: Fulup Ar Foll <fulup@iot.bzh>
  *
  * $RP_BEGIN_LICENSE$
@@ -23,14 +24,18 @@
  *  References:
  *  - https://nodejs.org/api/n-api.html#napi_reference_ref
  *  - https://github.com/nodejs/node-addon-examples
-*/ 
+*/
 
-#include <uv.h>
+#include "json_object.h"
 #include <node_api.h>
+#include "node_api_types.h"
+#include <uv.h>
+#include <stdint.h>
 
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <unistd.h>
 #include <wrap-json.h>
 
 #include "node-afb.h"
@@ -39,841 +44,581 @@
 
 #include <glue-afb.h>
 #include <glue-utils.h>
+#include <stdio.h>
+
+#include <time.h>
+
 
 // global afbMain glue
-AfbHandleT *afbMain=NULL;
+GlueHandleT *afbMain=NULL;
 
-#define GLUE_RETURN_NULL { \
-    napi_value resultN; \
-    napi_get_null(env, &resultN); \
-    return resultN; }
-
-
-
-static napi_value  GluePrintInfo(napi_env env, napi_callback_info info)
-{
+static napi_value  GluePrintInfo(napi_env env, napi_callback_info info) {
     napiPrintMsg(AFB_SYSLOG_LEVEL_INFO, env, info);
     GLUE_RETURN_NULL;
 }
 
-static napi_value  GluePrintError(napi_env env, napi_callback_info info)
-{
+static napi_value  GluePrintError(napi_env env, napi_callback_info info) {
     napiPrintMsg(AFB_SYSLOG_LEVEL_ERROR, env, info);
     GLUE_RETURN_NULL;
 }
 
-static napi_value  GluePrintWarning(napi_env env, napi_callback_info info)
-{
+static napi_value  GluePrintWarning(napi_env env, napi_callback_info info) {
     napiPrintMsg(AFB_SYSLOG_LEVEL_WARNING, env, info);
     GLUE_RETURN_NULL;
 }
 
-static napi_value  GluePrintNotice(napi_env env, napi_callback_info info)
-{
+static napi_value  GluePrintNotice(napi_env env, napi_callback_info info) {
     napiPrintMsg(AFB_SYSLOG_LEVEL_NOTICE, env, info);
     GLUE_RETURN_NULL;
 }
 
-static napi_value  GluePrintDebug(napi_env env, napi_callback_info info)
-{
+static napi_value  GluePrintDebug(napi_env env, napi_callback_info info) {
     napiPrintMsg(AFB_SYSLOG_LEVEL_DEBUG, env, info);
     GLUE_RETURN_NULL;
 }
 
-
-/*
-static napi_value GlueBinderConf(napi_env env, napi_callback_info info)
+static napi_value GlueEvtPush(napi_env env, napi_callback_info info)
 {
-    const char *errorMsg="syntax: binder(config)";
-    if (afbMain) {
-        errorMsg="(hoops) binder(config) already loaded";
+    const char *errorCode="internal-error", *errorMsg = "syntax: eventpush(eventid, [arg1 ... argn])";
+    napi_status statusN;
+    json_object *valueJ;
+    int  count=0;
+    afb_data_t *params=NULL;
+    afb_event_t evtid;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc < GLUE_ONE_ARG) {
+        errorCode="too-few-arguments";
         goto OnErrorExit;
     }
 
-    // allocate afbMain glue and parse config to jsonC
-    afbMain= calloc(1, sizeof(AfbHandleT));
-    afbMain->magic= GLUE_BINDER_MAGIC;
-
-    if (!nodeArg_ParseTuple(argsP, "O", &afbMain->binder.configR)) {
-        errorMsg= "invalid config object";
-        goto OnErrorExit;
-    }
-    json_object *configJ= nodeObjToJson(afbMain->binder.configR);
-    if (!configJ) {
-        errorMsg="json incompatible config";
+    // retreive afb glue handle from 1st argument
+    statusN= napi_get_value_external (env, args[0], (void**)&evtid);
+    if (statusN != napi_ok || !afb_event_is_valid(evtid)) {
+        errorCode="invalid-evt-handle";
         goto OnErrorExit;
     }
 
-    errorMsg= AfbBinderConfig(configJ, &afbMain->binder.afb);
-    if (errorMsg) goto OnErrorExit;
-
-    // return afbMain glue as a nodejs capcule glue
-    napi_value capcule= nodeCapsule_New(afbMain, GLUE_AFB_UID, NULL);
-    return capcule;
-
-OnErrorExit:
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    nodeErr_Print();
-    GLUE_RETURN_NULL;
-}
-
-
-static napi_value GlueBindingLoad(napi_env env, napi_callback_info info)
-{
-    const char *errorMsg =  "syntax: binding(config)";
-    napi_value configR;
-
-    if (!nodeArg_ParseTuple(argsP, "O", &configR)) goto OnErrorExit;
-
-    json_object *configJ= nodeObjToJson(configR);
-    if (!configJ) goto OnErrorExit;
-
-    errorMsg = AfbBindingLoad(afbMain->binder.afb, configJ);
-    if (errorMsg) goto OnErrorExit;
-
-    GLUE_RETURN_NULL;
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueAsyncCall(napi_env env, napi_callback_info info)
-{
-    const char *errorMsg= "syntax: callasync(handle, api, verb, callback, context, ...)";
-    long index=0;
-
-    // parse input arguments
-    long count = nodeTuple_GET_SIZE(argsP);
-    afb_data_t params[count];
-    if (count < GLUE_FIVE_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue) goto OnErrorExit;
-
-    const char* apiname= nodeUnicode_AsUTF8(nodeTuple_GetItem(argsP,1));
-    if (!apiname) goto OnErrorExit;
-
-    const char* verbname= nodeUnicode_AsUTF8(nodeTuple_GetItem(argsP,2));
-    if (!verbname) goto OnErrorExit;
-
-    napi_value callbackP=nodeTuple_GetItem(argsP,3);
-    // check callback is a valid function
-    if (!nodeCallable_Check(callbackP)) goto OnErrorExit;
-
-    napi_value userdataP =nodeTuple_GetItem(argsP,4);
-    if (userdataP != node_None) node_IncRef(userdataP);
-
-    // retreive subcall optional argument(s)
-    for (index= 0; index < count-GLUE_FIVE_ARG; index++)
-    {
-        json_object *argsJ = nodeObjToJson(nodeTuple_GetItem(argsP,index+GLUE_FIVE_ARG));
-        if (!argsJ)
-        {
-            errorMsg = "invalid input argument type";
-            goto OnErrorExit;
+    if (argc > GLUE_ONE_ARG) {
+        params= alloca(sizeof(afb_data_t*)*(argc-GLUE_ONE_ARG));
+        for (int idx = GLUE_ONE_ARG ; idx < argc; idx++) {
+            valueJ = napiValuetoJsonc(env, args[idx]);
+            if (!valueJ)  {
+                errorCode= "invalid-argument-data";
+                goto OnErrorExit;
+            }
+            afb_create_data_raw(&params[count], AFB_PREDEFINED_TYPE_JSON_C, valueJ, 0, (void *)json_object_put, valueJ);
+            count++;
         }
-        afb_create_data_raw(&params[index], AFB_PREDEFINED_TYPE_JSON_C, argsJ, 0, (void *)json_object_put, argsJ);
     }
 
-    nodeAsyncCtxT *cbHandle= calloc(1,sizeof(nodeAsyncCtxT));
-    cbHandle->glue= glue;
-    cbHandle->callbackP= callbackP;
-    cbHandle->userdataP= userdataP;
-    node_IncRef(cbHandle->callbackP);
-
-    switch (glue->magic) {
-        case GLUE_RQT_MAGIC:
-            afb_req_subcall (glue->rqt.afb, apiname, verbname, (int)index, params, afb_req_subcall_catch_events, GlueRqtSubcallCb, (void*)cbHandle);
-            break;
-        case GLUE_LOCK_MAGIC:
-        case GLUE_API_MAGIC:
-        case GLUE_BINDER_MAGIC:
-            afb_api_call(GlueGetApi(glue), apiname, verbname, (int)index, params, GlueApiSubcallCb, (void*)cbHandle);
-            break;
-
-        default:
-            errorMsg = "handle should be a req|api";
-            goto OnErrorExit;
+    int err = afb_event_push(evtid, count, params);
+    if (err < 0)
+    {
+        errorCode = "afb-event-push-fail";
+        goto OnErrorExit;
     }
     GLUE_RETURN_NULL;
 
 OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
     GLUE_RETURN_NULL;
 }
 
-static napi_value GlueSyncCall(napi_env env, napi_callback_info info)
+static napi_value GlueEvtSubscribe(napi_env env, napi_callback_info info)
 {
-    const char *errorMsg= "syntax: callsync(handle, api, verb, ...)";
-    int err, statusN;
-    long index=0, count = nodeTuple_GET_SIZE(argsP);
-    afb_data_t params[count];
-    unsigned nreplies= SUBCALL_MAX_RPLY;
-    afb_data_t replies[SUBCALL_MAX_RPLY];
+    const char *errorCode="internal-error", *errorMsg = "syntax: subscribe(rqt, eventid)";
+    napi_status statusN;
+    afb_event_t evtid;
 
-    // parse input arguments
-    if (count < GLUE_THREE_ARG) goto OnErrorExit;
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
 
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue) goto OnErrorExit;
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_TWO_ARG) {
+        errorCode="invalid-arguments-count";
+        goto OnErrorExit;
+    }
 
-    const char* apiname= nodeUnicode_AsUTF8(nodeTuple_GetItem(argsP,1));
-    if (!apiname) goto OnErrorExit;
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || glue->magic != GLUE_RQT_MAGIC) {
+        errorCode="invalid-rqt-handle";
+        goto OnErrorExit;
+    }
 
-    const char* verbname= nodeUnicode_AsUTF8(nodeTuple_GetItem(argsP,2));
-    if (!verbname) goto OnErrorExit;
+    statusN= napi_get_value_external (env, args[1], (void**)&evtid);
+    if (statusN != napi_ok || !afb_event_is_valid(evtid)) {
+        errorCode="invalid-event-handle";
+        goto OnErrorExit;
+    }
 
-    // retreive subcall api argument(s)
-    for (index = 0; index < count-GLUE_THREE_ARG; index++)
+    int err = afb_req_subscribe(glue->rqt.afb, evtid);
+    if (err)
     {
-        json_object *argsJ = nodeObjToJson(nodeTuple_GetItem(argsP,index+GLUE_THREE_ARG));
-        if (!argsJ)
-        {
-            errorMsg = "(hoops) afb_subcall_sync fail";
-            goto OnErrorExit;
-        }
-        afb_create_data_raw(&params[index], AFB_PREDEFINED_TYPE_JSON_C, argsJ, 0, (void *)json_object_put, argsJ);
-    }
-
-    switch (glue->magic) {
-        case GLUE_RQT_MAGIC:
-            err= afb_req_subcall_sync (glue->rqt.afb, apiname, verbname, (int)index, params, afb_req_subcall_catch_events, &statusN, &nreplies, replies);
-            break;
-        case GLUE_LOCK_MAGIC:
-        case GLUE_API_MAGIC:
-        case GLUE_BINDER_MAGIC:
-            err= afb_api_call_sync (GlueGetApi(glue), apiname, verbname, (int)index, params, &statusN, &nreplies, replies);
-            break;
-
-        default:
-            errorMsg = "handle should be a req|api";
-            goto OnErrorExit;
-    }
-
-    if (err) {
-        statusN   = err;
-        errorMsg= "api subcall fail";
+        errorCode = "afb-req-subscribe-fail";
         goto OnErrorExit;
     }
-    // subcall was refused
-    if (AFB_IS_BINDER_ERRNO(statusN)) {
-        errorMsg= afb_error_text(statusN);
+    GLUE_RETURN_NULL;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueEvtUnsubscribe(napi_env env, napi_callback_info info)
+{
+    const char *errorCode="internal-error", *errorMsg = "syntax: unsubscribe(rqt, eventid)";
+    napi_status statusN;
+    afb_event_t evtid;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_TWO_ARG) {
+        errorCode="invalid-arguments-count";
         goto OnErrorExit;
     }
 
-    // retreive response and build nodejs response
-    napi_value resultN= nodeTuple_New(nreplies+1);
-    nodeTuple_SetItem(resultN, 0, nodeLong_FromLong((long)statusN));
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || glue->magic != GLUE_RQT_MAGIC) {
+        errorCode="invalid-rqt-handle";
+        goto OnErrorExit;
+    }
 
-    errorMsg= nodePushAfbReply (resultN, 1, nreplies, replies);
-    if (errorMsg) goto OnErrorExit;
+    statusN= napi_get_value_external (env, args[1], (void**)&evtid);
+    if (statusN != napi_ok || !afb_event_is_valid(evtid)) {
+        errorCode="invalid-event-handle";
+        goto OnErrorExit;
+    }
 
+    int err = afb_req_unsubscribe(glue->rqt.afb, evtid);
+    if (err)
+    {
+        errorCode = "afb-req-unsubscribe-fail";
+        goto OnErrorExit;
+    }
+    GLUE_RETURN_NULL;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueEvtNew(napi_env env, napi_callback_info info)
+{
+    const char *errorCode="internal-error", *errorMsg = "syntax: eventid= eventnew(api,label)";
+    napi_status statusN;
+    afb_event_t evtid;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc], resultN;
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_TWO_ARG) {
+        errorCode="invalid-arguments-count";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || !GlueGetApi(glue)) {
+        errorCode="invalid-api-handle";
+        goto OnErrorExit;
+    }
+
+    char *label= napiValueToString(env, args[1]);
+    if (!label) {
+        errorCode="invalid-evt-label";
+        goto OnErrorExit;
+    }
+
+    int err= afb_api_new_event(glue->api.afb, label, &evtid);
+    if (err)
+    {
+        errorMsg = "afb-api-new-event-fail";
+        goto OnErrorExit;
+    }
+
+    // push event handle as a node opaque handle
+    statusN= napi_create_external(env, evtid, NULL, NULL, &resultN);
+    if (statusN != napi_ok) goto OnErrorExit;
     return resultN;
 
 OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
     GLUE_RETURN_NULL;
 }
 
-static napi_value GlueEventPush(napi_env env, napi_callback_info info)
-{
-    const char *errorMsg = "syntax: eventpush(event, [arg1...argn])";
-    long count = nodeTuple_GET_SIZE(argsP);
-    afb_data_t params[count];
-    long index=0;
-
-    if (count < GLUE_ONE_ARG) goto OnErrorExit;
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue || glue->magic != GLUE_EVT_MAGIC) goto OnErrorExit;
-
-    // get response from node and push them as afb-v4 object
-    for (index= 0; index < count-GLUE_ONE_ARG; index++)
-    {
-        json_object *argsJ = nodeObjToJson(nodeTuple_GetItem(argsP,index+GLUE_ONE_ARG));
-        if (!argsJ)
-        {
-            errorMsg = "invalid argument type";
-            goto OnErrorExit;
-        }
-        afb_create_data_raw(&params[index], AFB_PREDEFINED_TYPE_JSON_C, argsJ, 0, (void *)json_object_put, argsJ);
-    }
-
-    int statusN = afb_event_push(glue->evt.afb, (int) index, params);
-    if (statusN < 0)
-    {
-        errorMsg = "afb_event_push fail sending event";
-        goto OnErrorExit;
-    }
-    glue->evt.count++;
-    GLUE_RETURN_NULL;
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueEventSubscribe(napi_env env, napi_callback_info info)
-{
-    const char *errorMsg = "syntax: subscribe(rqt, event)";
-
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_TWO_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue || glue->magic != GLUE_RQT_MAGIC) goto OnErrorExit;
-
-    AfbHandleT* handle= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,1), GLUE_AFB_UID);
-    if (!handle || handle->magic != GLUE_EVT_MAGIC) goto OnErrorExit;
-
-    int err = afb_req_subscribe(glue->rqt.afb, handle->evt.afb);
-    if (err)
-    {
-        errorMsg = "fail subscribing afb event";
-        goto OnErrorExit;
-    }
-    GLUE_RETURN_NULL;
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueEventUnsubscribe(napi_env env, napi_callback_info info)
-{
-    const char *errorMsg = "syntax: unsubscribe(rqt, event)";
-
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_TWO_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue || glue->magic != GLUE_RQT_MAGIC) goto OnErrorExit;
-
-    AfbHandleT* handle= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,1), GLUE_AFB_UID);
-    if (!handle || handle->magic != GLUE_EVT_MAGIC) goto OnErrorExit;
-
-    int err = afb_req_unsubscribe(glue->rqt.afb, handle->evt.afb);
-    if (err)
-    {
-        errorMsg = "(hoops) afb_req_unsubscribe fail";
-        goto OnErrorExit;
-    }
-    GLUE_RETURN_NULL;
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueEventNew(napi_env env, napi_callback_info info)
-{
-    const char *errorMsg = "syntax: eventnew(api, config)";
-    napi_value slotP;
-    int err;
-
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_TWO_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue || glue->magic != GLUE_API_MAGIC) goto OnErrorExit;
-
-    // create a new binder event
-    errorMsg = "evtconf={'uid':'xxx', 'name':'yyyy'}";
-    AfbHandleT *nodeEvt = calloc(1, sizeof(AfbHandleT));
-    nodeEvt->magic = GLUE_EVT_MAGIC;
-    nodeEvt->evt.apiv4= GlueGetApi(glue);
-
-    nodeEvt->evt.configR = nodeTuple_GetItem(argsP,1);
-    if (!nodeDict_Check(nodeEvt->evt.configR)) goto OnErrorExit;
-    node_IncRef(nodeEvt->evt.configR);
-
-    slotP= nodeDict_GetItemString(nodeEvt->evt.configR, "uid");
-    if (!slotP || !nodeUnicode_Check(slotP)) goto OnErrorExit;
-    nodeEvt->evt.uid= nodeUnicode_AsUTF8(slotP);
-
-    slotP= nodeDict_GetItemString(nodeEvt->evt.configR, "name");
-    if (!slotP) nodeEvt->evt.name = nodeEvt->evt.uid;
-    else {
-        if (!nodeUnicode_Check(slotP)) goto OnErrorExit;
-        nodeEvt->evt.name= nodeUnicode_AsUTF8(slotP);
-    }
-
-    err= afb_api_new_event(glue->api.afb, nodeEvt->evt.name, &nodeEvt->evt.afb);
-    if (err)
-    {
-        errorMsg = "(hoops) afb-afb_api_new_event fail";
-        goto OnErrorExit;
-    }
-
-    // push event handler as a node opaque handle
-    return nodeCapsule_New(nodeEvt, GLUE_AFB_UID, NULL);
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueVerbAdd(napi_env env, napi_callback_info info)
-{
-    const char *errorMsg = "syntax: addverb(api, config, context)";
-
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_THREE_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue || glue->magic != GLUE_API_MAGIC) goto OnErrorExit;
-
-    json_object *configJ= nodeObjToJson (nodeTuple_GetItem(argsP,1));
-    if (!configJ) goto OnErrorExit;
-
-    napi_value userdataP= nodeTuple_GetItem(argsP,2);
-    if (userdataP) node_IncRef(userdataP);
-
-    errorMsg= AfbAddOneVerb (afbMain->binder.afb, glue->api.afb, configJ, GlueVerbCb, userdataP);
-    if (errorMsg) goto OnErrorExit;
-
-    GLUE_RETURN_NULL;
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueSetLoa(napi_env env, napi_callback_info info)
-{
-    const char *errorMsg = "syntax: setloa(rqt, newloa)";
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_TWO_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue && glue->magic != GLUE_RQT_MAGIC) goto OnErrorExit;
-
-    int loa= (int)nodeLong_AsLong(nodeTuple_GetItem(argsP,1));
-    if (loa < 0) goto OnErrorExit;
-
-    int err= afb_req_session_set_LOA(glue->rqt.afb, loa);
-    if (err < 0) {
-        errorMsg="Invalid Rqt Session";
-        goto OnErrorExit;
-    }
-
-    GLUE_RETURN_NULL;
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
 
 static napi_value GlueTimerAddref(napi_env env, napi_callback_info info) {
-    const char *errorMsg="syntax: timeraddref(handle)";
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_ONE_ARG) goto OnErrorExit;
+    const char *errorCode="internal-error", *errorMsg = "syntax:  timeraddref(timerid)";
+    napi_status statusN;
 
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue || glue->magic != GLUE_TIMER_MAGIC) goto OnErrorExit;
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
 
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_ONE_ARG) {
+        errorCode="invalid-arguments-count";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || glue->magic != GLUE_TIMER_MAGIC) {
+        errorCode="invalid-timer-handle";
+        goto OnErrorExit;
+    }
+
+    glue->usage++;
     afb_timer_addref (glue->timer.afb);
-    node_IncRef(glue->timer.configR);
-    glue->timer.usage++;
     GLUE_RETURN_NULL;
 
 OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
     GLUE_RETURN_NULL;
 }
 
 static napi_value GlueTimerUnref(napi_env env, napi_callback_info info) {
-    const char *errorMsg="syntax: timerunref(handle)";
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_ONE_ARG) goto OnErrorExit;
+    const char *errorCode="internal-error", *errorMsg = "syntax:  timerunref(handle)";
+    napi_status statusN;
 
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue || glue->magic != GLUE_TIMER_MAGIC) goto OnErrorExit;
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
 
-    GlueTimerClear(glue);
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_TWO_ARG) {
+        errorCode="invalid-arguments-count";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || glue->magic != GLUE_TIMER_MAGIC) {
+        errorCode="invalid-timer-handle";
+        goto OnErrorExit;
+    }
+
+    GlueFreeHandleCb(env, glue);
     GLUE_RETURN_NULL;
 
 OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
     GLUE_RETURN_NULL;
 }
 
-static napi_value GlueEventHandler(napi_env env, napi_callback_info info)
+static napi_value GlueEvtHandler(napi_env env, napi_callback_info info)
 {
-    napi_value slotP;
-    const char *errorMsg = "syntax: evthandler(handle, config, userdata)";
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_THREE_ARG) goto OnErrorExit;
+    const char  *errorCode="internal-error", *errorMsg= "syntax: evthandler(api, {'uid':'xxx','pattern':'yyy','callback':'zzz'}, [userdata])";
+    napi_status statusN;
 
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue) goto OnErrorExit;
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
 
-    // retreive API from lua handle
-    afb_api_t afbApi= GlueGetApi(glue);
-    if (!afbApi) goto OnErrorExit;
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc < GLUE_TWO_ARG || argc > GLUE_THREE_ARG) {
+        errorCode="invalid-arguments-count";
+        goto OnErrorExit;
+    }
 
-    AfbHandleT *handle= calloc(1, sizeof(AfbHandleT));
-    handle->magic= GLUE_HANDLER_MAGIC;
-    handle->handler.apiv4= afbApi;
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok) {
+        errorCode="invalid-rqt-handle";
+        goto OnErrorExit;
+    }
 
-    handle->handler.configR = nodeTuple_GetItem(argsP,1);
-    if (!nodeDict_Check(handle->handler.configR)) goto OnErrorExit;
-    node_IncRef(handle->handler.configR);
+    GlueHandleT *handle = calloc(1, sizeof(GlueHandleT));
+    handle->magic = GLUE_EVT_MAGIC;
+    handle->onError= glue->onError;
+    handle->env=env;
 
-    errorMsg= "config={'uid':'xxx','pattern':'yyy','callback':'zzz'}";
-    slotP= nodeDict_GetItemString(handle->handler.configR, "uid");
-    if (!slotP || !nodeUnicode_Check(slotP)) goto OnErrorExit;
-    handle->handler.uid= nodeUnicode_AsUTF8(slotP);
+    statusN= napi_create_reference(env, args[1], 1, &handle->event.configR);
+    if (statusN != napi_ok) {
+        errorCode= "config-not-referencable";
+        goto OnErrorExit;
+    }
 
-    slotP= nodeDict_GetItemString(handle->handler.configR, "pattern");
-    if (!slotP || !nodeUnicode_Check(slotP)) goto OnErrorExit;
-    const char *pattern= nodeUnicode_AsUTF8(slotP);
+    // retreive API from py handle
+    handle->event.apiv4= GlueGetApi(glue);
+    if (!handle->event.apiv4) {
+        errorCode="handle-api-missing";
+        goto OnErrorExit;
+    }
 
-    handle->handler.callbackP= nodeDict_GetItemString(handle->handler.configR, "callback");
-    if (!slotP || !nodeCallable_Check(handle->handler.callbackP)) goto OnErrorExit;
-    node_IncRef(handle->handler.callbackP);
+    napi_value callbackN= napiGetElement(env, args[1], "callback");
+    if (!callbackN || napiGetType(env, callbackN)!= napi_function) {
+        errorCode = "callback-not-function";
+        goto OnErrorExit;
+    }
 
-    handle->handler.userdataP = nodeTuple_GetItem(argsP,2);
-    if (handle->handler.userdataP) node_IncRef(handle->handler.userdataP);
+    statusN= napi_create_reference(env, callbackN, 1, &handle->event.async.callbackR);
+    if (statusN != napi_ok) {
+        errorCode= "config-referencable-callback";
+        goto OnErrorExit;
+    }
 
-    errorMsg= AfbAddOneEvent (afbApi, handle->handler.uid, pattern, GlueEvtHandlerCb, handle);
+    if (argc == GLUE_THREE_ARG) {
+      statusN= napi_create_reference(env, args[2], 1, (void*)&handle->event.async.userdataR);
+        if (statusN != napi_ok) {
+            errorCode= "userdata-not-referencable";
+            goto OnErrorExit;
+        }
+    }
+
+    handle->uid= napiGetString(glue->env, args[1], "uid");
+    if (!handle->uid) {
+        errorCode = "config-missing-uid";
+        goto OnErrorExit;
+    }
+
+    handle->event.pattern= napiGetString(glue->env, args[1], "pattern");
+    if (!handle->event.pattern) {
+        errorCode = "config-missing-pattern";
+        goto OnErrorExit;
+    }
+
+    errorMsg= AfbAddOneEvent (handle->event.apiv4, handle->uid, handle->event.pattern, GlueEventCb, handle);
     if (errorMsg) goto OnErrorExit;
 
-    GLUE_RETURN_NULL;
+    // push handle as a node opaque handle
+    napi_value resultN;
+    statusN= napi_create_external (env, handle, NULL, NULL, &resultN);
+    if (statusN != napi_ok) goto OnErrorExit;
+    return resultN;
 
 OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
     GLUE_RETURN_NULL;
 }
 
 static napi_value GlueTimerNew(napi_env env, napi_callback_info info)
 {
-    const char *errorMsg = "syntax: timernew(api, config, context)";
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue) goto OnErrorExit;
+    const char  *errorCode="internal-error", *errorMsg= "syntax: timernew(api, {'uid':'xxx','callback':yyy,'period':ms,'count':nn}, userdata)";
+    napi_status statusN;
 
-    AfbHandleT *handle= (AfbHandleT *)calloc(1, sizeof(AfbHandleT));
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_THREE_ARG) {
+        errorCode="invalid-arguments-count";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok) {
+        errorCode="invalid-rqt-handle";
+        goto OnErrorExit;
+    }
+
+    GlueHandleT *handle = calloc(1, sizeof(GlueHandleT));
     handle->magic = GLUE_TIMER_MAGIC;
-    handle->timer.configR = nodeTuple_GetItem(argsP,1);
-    if (!nodeDict_Check(handle->timer.configR)) goto OnErrorExit;
-    node_IncRef(handle->timer.configR);
+    handle->env=env;
+    handle->onError= glue->onError;
 
-    handle->timer.userdataP =nodeTuple_GetItem(argsP,2);
-    if (handle->timer.userdataP != node_None) node_IncRef(handle->timer.userdataP);
+    statusN= napi_create_reference(env, args[1], 1, &handle->timer.configR);
+    if (statusN != napi_ok) {
+        errorCode= "config-not-referencable";
+        goto OnErrorExit;
+    }
 
-    // parse config
-    napi_value slotP;
-    errorMsg= "timerconfig= {'uid':'xxx', 'callback': MyCallback, 'period': timer(ms), 'count': 0-xx}";
-    slotP= nodeDict_GetItemString(handle->timer.configR, "uid");
-    if (!slotP || !nodeUnicode_Check(slotP)) goto OnErrorExit;
-    handle->timer.uid= nodeUnicode_AsUTF8(slotP);
+    // retreive API from py handle
+    handle->timer.apiv4= GlueGetApi(glue);
+    if (!handle->timer.apiv4) {
+        errorCode="handle-api-missing";
+        goto OnErrorExit;
+    }
 
-    handle->timer.callbackP= nodeDict_GetItemString(handle->timer.configR, "callback");
-    if (!handle->timer.callbackP || !nodeCallable_Check(handle->timer.callbackP)) goto OnErrorExit;
+    statusN= napi_create_reference(env, args[2], 1, (void*)&handle->timer.async.userdataR);
+    if (statusN != napi_ok) {
+        errorCode= "userdata-not-referencable";
+        goto OnErrorExit;
+    }
 
-    slotP= nodeDict_GetItemString(handle->timer.configR, "period");
-    if (!slotP || !nodeLong_Check(slotP)) goto OnErrorExit;
-    long period= nodeLong_AsLong(slotP);
-    if (period <= 0) goto OnErrorExit;
+    napi_value callbackN= napiGetElement(env, args[1], "callback");
+    if (!callbackN || napiGetType(env, callbackN)!= napi_function) {
+        errorCode = "callback-not-function";
+        goto OnErrorExit;
+    }
 
+    statusN= napi_create_reference(env, callbackN, 1, (void*)&handle->timer.async.callbackR);
+    if (statusN != napi_ok) {
+        errorCode= "config-referencable-callback";
+        goto OnErrorExit;
+    }
 
-    slotP= nodeDict_GetItemString(handle->timer.configR, "count");
-    if (!slotP || !nodeLong_Check(slotP)) goto OnErrorExit;
-    long count= nodeLong_AsLong(slotP);
-    if (period < 0) goto OnErrorExit;
+    handle->uid= napiGetString(glue->env, args[1], "uid");
+    if (!handle->uid) {
+        errorCode = "config-missing-uid";
+        goto OnErrorExit;
+    }
 
+    napi_value periodN= napiGetElement(env, args[1], "period");
+    if (!periodN) {
+        errorCode= "config-period-missing";
+        goto OnErrorExit;
+    }
+    int64_t period;
+    statusN= napi_get_value_int64(env, periodN, &period);
+    if (!periodN || period < 0) {
+        errorCode= "period-not-valid";
+        goto OnErrorExit;
+    }
+
+    napi_value countN= napiGetElement(env, args[1], "count");
+    if (!countN) {
+        errorCode= "config-count-missing";
+        goto OnErrorExit;
+    }
+
+    int64_t count;
+    statusN= napi_get_value_int64(env, countN, &count);
+    if (!countN || count < 0) {
+        errorCode= "count-not-valid";
+        goto OnErrorExit;
+    }
+
+    handle->usage++;
     int err= afb_timer_create (&handle->timer.afb, 0, 0, 0, (int)count, (int)period, 0, GlueTimerCb, (void*)handle, 0);
     if (err) {
         errorMsg= "(hoops) afb_timer_create fail";
         goto OnErrorExit;
     }
 
-    return nodeCapsule_New(handle, GLUE_AFB_UID, NULL);
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueSchedWait(napi_env env, napi_callback_info info)
-{
-    AfbHandleT *lock=NULL;
-    int err;
-
-    long count = nodeTuple_GET_SIZE(argsP);
-    const char *errorMsg = "schedwait(handle, timeout, callback, [context])";
-    if (count < GLUE_THREE_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue) goto OnErrorExit;
-
-    long timeout= nodeLong_AsLong(nodeTuple_GetItem(argsP,1));
-    if (timeout < 0) goto OnErrorExit;
-
-    napi_value callbackP= nodeTuple_GetItem(argsP,2);
-    if (!nodeCallable_Check(callbackP)) goto OnErrorExit;
-    node_IncRef(callbackP);
-
-    napi_value userdataP= nodeTuple_GetItem(argsP,3);
-    if (userdataP != node_None) node_IncRef(userdataP);
-
-    lock= calloc (1, sizeof(AfbHandleT));
-    lock->magic= GLUE_LOCK_MAGIC;
-    lock->lock.apiv4= GlueGetApi(glue);
-    lock->lock.callbackP= callbackP;
-    lock->lock.userdataP= userdataP;
-
-    err= afb_sched_enter(NULL, (int)timeout, GlueSchedWaitCb, lock);
-    if (err) {
-        errorMsg= "fail to register afb_sched_enter";
-        goto OnErrorExit;
-    }
-
-    // free lock handle
-    node_DecRef(lock->lock.callbackP);
-    if (lock->lock.userdataP) node_DecRef(lock->lock.userdataP);
-    long statusN= lock->lock.statusN;
-    free (lock);
-
-    return nodeLong_FromLong(statusN);
-
-OnErrorExit:
-    if (lock) {
-        node_DecRef(lock->lock.callbackP);
-        if (lock->lock.userdataP) node_DecRef(lock->lock.userdataP);
-        free (lock);
-    }
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueSchedCancel(napi_env env, napi_callback_info info)
-{
-    long count = nodeTuple_GET_SIZE(argsP);
-    const char *errorMsg = "syntax: schedcancel(jobid)";
-    if (count != GLUE_ONE_ARG) goto OnErrorExit;
-
-    long jobid= nodeLong_AsLong(nodeTuple_GetItem(argsP,0));
-    if (jobid <= 0) goto OnErrorExit;
-
-    int err= afb_jobs_abort((int)jobid);
-    if (err) goto OnErrorExit;
-    GLUE_RETURN_NULL;
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueSchedPost(napi_env env, napi_callback_info info)
-{
-    GlueHandleCbT *glue=calloc (1, sizeof(GlueHandleCbT));
-    glue->magic = GLUE_SCHED_MAGIC;
-
-    long count = nodeTuple_GET_SIZE(argsP);
-    const char *errorMsg = "syntax: schedpost(glue, timeout, callback [,userdata])";
-    if (count != node_FOUR_ARG) goto OnErrorExit;
-
-    glue->handle= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue->handle) goto OnErrorExit;
-
-    long timeout= nodeLong_AsLong(nodeTuple_GetItem(argsP,1));
-    if (timeout <= 0) goto OnErrorExit;
-
-    glue->callbackP= nodeTuple_GetItem(argsP,2);
-    if (!nodeCallable_Check(glue->callbackP)) {
-        errorMsg="syntax: callback should be a valid callable function";
-        goto OnErrorExit;
-    }
-    node_IncRef(glue->callbackP);
-
-    glue->userdataP =nodeTuple_GetItem(argsP,3);
-    if (glue->userdataP != node_None) node_IncRef(glue->userdataP);
-
-    // ms delay for OnTimerCB (timeout is dynamic and depends on CURLOPT_LOW_SPEED_TIME)
-    int jobid= afb_sched_post_job (NULL , timeout,  0 ,GlueSchedTimeoutCb, glue, Afb_Sched_Mode_Start);
-	if (jobid <= 0) goto OnErrorExit;
-
-    return nodeLong_FromLong(jobid);
-
-OnErrorExit:
-        GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueSchedUnlock(napi_env env, napi_callback_info info)
-{
-    int err;
-    const char *errorMsg = "syntax: schedunlock(handle, lock, statusN)";
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count !=  GLUE_THREE_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue) goto OnErrorExit;
-
-    AfbHandleT *lock= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,1), GLUE_AFB_UID);
-    if (!lock || lock->magic != GLUE_LOCK_MAGIC) goto OnErrorExit;
-
-    lock->lock.statusN= nodeLong_AsLong(nodeTuple_GetItem(argsP,2));
-
-    err= afb_sched_leave(lock->lock.afb);
-    if (err) {
-        errorMsg= "fail to register afb_sched_enter";
-        goto OnErrorExit;
-    }
-
-    GLUE_RETURN_NULL;
-
-OnErrorExit:
-    GLUE_AFB_ERROR(glue, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueExit(napi_env env, napi_callback_info info)
-{
-    const char *errorMsg= "syntax: exit(handle, statusN)";
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_TWO_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue) goto OnErrorExit;
-
-    long exitCode= nodeLong_AsLong(nodeTuple_GetItem(argsP,1));
-
-    AfbBinderExit(afbMain->binder.afb, (int)exitCode);
-    GLUE_RETURN_NULL;
-
-OnErrorExit:
-    GLUE_AFB_ERROR(glue, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-static napi_value GlueClientInfo(napi_env env, napi_callback_info info)
-{
+    // push handler as a node opaque handle
     napi_value resultN;
-    const char *errorMsg = "syntax: clientinfo(rqt, ['key'])";
-    long count = nodeTuple_GET_SIZE(argsP);
-    if (count != GLUE_ONE_ARG && count != GLUE_TWO_ARG) goto OnErrorExit;
-
-    AfbHandleT* glue= nodeCapsule_GetPointer(nodeTuple_GetItem(argsP,0), GLUE_AFB_UID);
-    if (!glue || glue->magic != GLUE_RQT_MAGIC) goto OnErrorExit;
-
-    napi_value keyP= nodeTuple_GetItem(argsP,1);
-    if (keyP && !nodeUnicode_Check(keyP)) goto OnErrorExit;
-
-    json_object *clientJ= afb_req_get_client_info(glue->rqt.afb);
-    if (!clientJ) {
-        errorMsg= "(hoops) afb_req_get_client_info no session info";
-        goto OnErrorExit;
-    }
-
-    if (!keyP) {
-        resultN = jsonTonodeObj(clientJ);
-    } else {
-        json_object *keyJ= json_object_object_get(clientJ, nodeUnicode_AsUTF8(keyP));
-        if (!keyJ) {
-            errorMsg= "unknown client info key";
-            goto OnErrorExit;
-        }
-        resultN = jsonTonodeObj(keyJ);
-    }
-    return resultN;
-
-OnErrorExit:
-    GLUE_AFB_ERROR(glue, errorMsg);
-    nodeErr_SetString(nodeExc_RuntimeError, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
-*/
-
-// pop afb waiting event and process them
-static void GlueOnPoolUvCb(uv_poll_t* handle, int status, int events) {
-    afb_ev_mgr_wait_and_dispatch(0);
-    for (struct afb_job *job= afb_jobs_dequeue(0); job; job= afb_jobs_dequeue(0)) {
-        afb_jobs_run(job);
-    }
-    afb_ev_mgr_prepare();
-}
-
-// this routine execute within mainloop context when binder is ready to go
-static napi_value GlueMainLoop(napi_env env, napi_callback_info info)
-{
-    const char *errorCode, *errorMsg="syntax: mainloop([callback])";
-    napi_value resultN;
-    napi_status statusN;
-    int statusU;
-    uv_poll_t poolU;
-    uv_loop_t *loopU;
-
-    // get argument
-    size_t argc= GLUE_ONE_ARG;
-    napi_value args[GLUE_ONE_ARG];
-    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-    if (statusN != napi_ok || argc != GLUE_ONE_ARG) goto OnErrorExit;
-
-    napi_valuetype typeN;
-	statusN = napi_typeof(env, args[0], &typeN);
-    if (typeN != napi_function) {
-        errorCode="Invalid Callback";
-        goto OnErrorExit;
-    }
-
-    // create a reference to prevent callback from beeing deleted
-    napi_ref callbackR;
-    statusN= napi_create_reference(env, args[0], 1, &callbackR);
-    if (statusN != napi_ok) goto OnErrorExit;
-
-    // main loop only return when binder startup func return statusN!=0
-    GLUE_AFB_NOTICE(afbMain, "Entering binder mainloop");
-    statusN = AfbBinderEnter(afbMain->binder.afb, callbackR, GlueStartupCb, afbMain);
-    afb_ev_mgr_prepare();
-
-    // map afb loop back with node libuv
-    int afbfd = afb_ev_mgr_get_fd();
-	if (afbfd < 0) goto OnErrorExit;
-
-    statusN = napi_get_uv_event_loop(env, &loopU);
-	if (statusN != napi_ok) goto OnErrorExit;
-
- 	statusU = uv_poll_init(loopU, &poolU, afbfd);
-	if (statusU < 0) goto OnErrorExit;
-
-	statusU = uv_poll_start(&poolU, UV_READABLE, GlueOnPoolUvCb);
-	if (statusU < 0) goto OnErrorExit;
-
-    // Fulup TBD check option
-    statusU= uv_run(loopU, 1000000*360);
-    if (statusU < 0) goto OnErrorExit;
-
-    statusN= napi_create_int64 (env, (int64_t)statusN, &resultN);
+    statusN= napi_create_external (env, handle, NULL, NULL, &resultN);
     if (statusN != napi_ok) goto OnErrorExit;
     return resultN;
 
 OnErrorExit:
     GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    napi_throw_error(env, errorCode,errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
     GLUE_RETURN_NULL;
 }
 
+static napi_value GlueJobStatus(napi_env env, napi_callback_info info)
+{
+    const char  *errorCode="internal-error", *errorMsg= "syntax: jobstatus(loop)";
+    napi_status statusN;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_ONE_ARG) {
+        errorCode="invalid-arguments-count";
+        goto OnErrorExit;
+    }
+
+    // retreive afb loop handle from 1st argument
+    GlueHandleT *handle;
+    statusN= napi_get_value_external (env, args[0], (void**)&handle);
+    if (statusN != napi_ok || handle->magic != GLUE_JOB_MAGIC) {
+        errorCode="invalid-loop-handle";
+        goto OnErrorExit;
+    }
+
+    napi_value resultN;
+    statusN= napi_create_int64(env, handle->job.status, &resultN);
+
+    return resultN;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueJobKill(napi_env env, napi_callback_info info)
+{
+    const char  *errorCode="internal-error", *errorMsg= "syntax: jobkill(job, status)";
+    napi_status statusN;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_TWO_ARG) {
+        errorCode="invalid-arguments-count";
+        goto OnErrorExit;
+    }
+
+    // retreive afb loop handle from 1st argument
+    GlueHandleT *handle;
+    statusN= napi_get_value_external (env, args[0], (void**)&handle);
+    if (statusN != napi_ok || handle->magic != GLUE_JOB_MAGIC) {
+        errorCode="invalid-loop-handle";
+        goto OnErrorExit;
+    }
+
+    statusN= napi_get_value_int64(env, args[1], &handle->job.status);
+    if (statusN != napi_ok || napiGetType(env, args[1]) != napi_number) {
+        errorCode="invalid-status-number";
+        goto OnErrorExit;
+    }
+
+    // release semaphore
+    sem_post(&handle->job.sem);
+    GLUE_RETURN_NULL;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
 
 static napi_value GlueApiCreate(napi_env env, napi_callback_info info)
 {
@@ -893,51 +638,49 @@ static napi_value GlueApiCreate(napi_env env, napi_callback_info info)
     if (statusN != napi_ok || argc != GLUE_ONE_ARG) goto OnErrorExit;
     napi_value configN= args[0];
 
-    json_object *configJ= napiValuetoJsonc(env, configN);
+    json_object *configJ= napiValuetoJsonc(env, args[0]);
     if (!configJ) {
-        errorCode="Invalid-Config";
+        errorCode="invalid-config";
+        goto OnErrorExit;
+    }
+    // allocate afbMain glue and parse config to jsonC
+    GlueHandleT *glue= calloc(1, sizeof(GlueHandleT));
+    glue->magic= GLUE_API_MAGIC;
+    glue->uid= napiGetString(env, args[0], "uid");
+    glue->env=env;
+
+    // keep track of config reference within glue handle
+    statusN= napi_create_reference(env, configN, 1, &glue->api.configR);
+    if (statusN != napi_ok) {
+        errorCode="unreference-config";
         goto OnErrorExit;
     }
 
-    // allocate afbMain glue and parse config to jsonC
-    AfbHandleT *glue= calloc(1, sizeof(AfbHandleT));
-    glue->magic= GLUE_API_MAGIC;
-    glue->env=env;
-
-    // keep track of config reference within glue handle    
-    statusN= napi_create_reference(env, configN, 1, &glue->api.configR);
-    if (statusN != napi_ok) goto OnErrorExit;
-
-    const char *afbApiUri = NULL;
-    wrap_json_unpack(configJ, "{s?s}", "uri", &afbApiUri);
-    if (afbApiUri)
+    bool hasProperty;
+    statusN= napi_has_named_property(glue->env, configN, "uri", &hasProperty);
+    if (hasProperty)
     {
         // imported shadow api
         errorMsg = AfbApiImport(afbMain->binder.afb, configJ);
-    } 
+    }
     else
     {
-        bool hasProperty;
-        // create a reference to prevent callback from beeing deleted
-        statusN= napi_has_named_property (glue->env, configN, "control" , &hasProperty);
-        if (hasProperty) {
-            napi_value callbackN;
-            napi_ref callbackR;  
-            napi_get_named_property(glue->env, configN, "control", &callbackN);
-            if (napiGetType(env, callbackN) != napi_function) {
-                errorMsg="APi control func defined but but callable";
-                goto OnErrorExit;
-            }
-            statusN= napi_create_reference(env, callbackN, 1, &callbackR);
-            if (statusN != napi_ok) goto OnErrorExit;
-            errorMsg = AfbApiCreate(afbMain->binder.afb, configJ, &glue->api.afb, GlueCtrlCb, GlueInfoCb, GlueAsyncVerbCb, GlueEvtHandlerCb, glue);
-            } 
-            else
-            {
-                errorMsg = AfbApiCreate(afbMain->binder.afb, configJ, &glue->api.afb, NULL, GlueInfoCb, GlueAsyncVerbCb, GlueEvtHandlerCb, glue);
-            }
+        // extract control and error callback from configJ attached userdata
+        json_object *onErrorJ=NULL, *controlJ=NULL;
+        wrap_json_unpack (configJ, "{s?o,s?o}"
+            ,"control", &controlJ
+            ,"onerror", &onErrorJ
+        );
+        if (controlJ) glue->api.async= (GlueAsyncCtxT*)json_object_get_userdata (controlJ);
+        if (onErrorJ) glue->onError=(GlueAsyncCtxT*)json_object_get_userdata (onErrorJ);
+        else glue->onError= afbMain->onError; // default fall on binder onerror callback
+        if (glue->api.async) {
+            errorMsg = AfbApiCreate(afbMain->binder.afb, configJ, &glue->api.afb, GlueCtrlCb, GlueInfoCb, GlueRqtVerbCb, GlueEventCb, glue);
+        } else {
+            errorMsg = AfbApiCreate(afbMain->binder.afb, configJ, &glue->api.afb, NULL, GlueInfoCb, GlueRqtVerbCb, GlueEventCb, glue);
         }
-        if (errorMsg)  goto OnErrorExit;
+    }
+    if (errorMsg)  goto OnErrorExit;
 
     // return api glue as a nodejs capcule glue
     statusN= napi_create_external (env, glue, NULL, NULL, &resultN);
@@ -950,28 +693,35 @@ OnErrorExit:
     GLUE_RETURN_NULL;
 }
 
+// Process all afb waiting jobs
+static void GlueOnPoolUvCb(uv_poll_t* handle, int status, int events) {
+
+    //write (2,".", 1);
+    GluePollRunJobs();
+}
+
 static napi_value GlueBinderConf(napi_env env, napi_callback_info info)
 {
-    const char *errorCode=NULL, *errorMsg="syntax: binder(config)";
+    const char *errorCode="internal-error", *errorMsg="syntax: binder(config)";
     napi_value resultN;
     napi_status statusN;
     uint32_t unused=0;
 
-    if (afbMain) {
-        errorMsg="(hoops) binder(config) already loaded";
-        goto OnErrorExit;
-    }
-
     // allocate afbMain glue and parse config to jsonC
-    afbMain= calloc(1, sizeof(AfbHandleT));
-    afbMain->magic= GLUE_BINDER_MAGIC;
-    afbMain->env=env;
+    if (!afbMain) {
+        afbMain= calloc(1, sizeof(GlueHandleT));
+        afbMain->magic= GLUE_BINDER_MAGIC;
+        afbMain->env=env;
+    }
 
     // get arguments
     size_t argc= GLUE_ONE_ARG;
     napi_value args[GLUE_ONE_ARG];
     statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-    if (statusN != napi_ok || argc != GLUE_ONE_ARG) goto OnErrorExit;
+    if (statusN != napi_ok || argc != GLUE_ONE_ARG) {
+        errorCode= "invalid-argument-count";
+        goto OnErrorExit;
+    }
 
     json_object *configJ= napiValuetoJsonc(env, args[0]);
     if (!configJ) {
@@ -981,10 +731,39 @@ static napi_value GlueBinderConf(napi_env env, napi_callback_info info)
 
     errorMsg= AfbBinderConfig(configJ, &afbMain->binder.afb, afbMain);
     if (errorMsg) goto OnErrorExit;
+    afbMain->uid= napiGetString(env, args[0], "uid");
 
     // keep track of napi config object
     statusN= napi_create_reference(env, args[0], 1, &afbMain->binder.configR);
     if (statusN != napi_ok) goto OnErrorExit;
+
+    // extract control and error callback from configJ attached userdata
+    json_object *onErrorJ= json_object_object_get(configJ, "onerror");
+    if (onErrorJ) afbMain->onError= (GlueAsyncCtxT*)json_object_get_userdata (onErrorJ);
+
+    int status;
+
+    // main loop only return when binder startup func return statusN!=0
+    GLUE_AFB_NOTICE(afbMain, "Entering binder mainloop");
+    status = AfbBinderEnter(afbMain->binder.afb, NULL, NULL, NULL);
+    if (status < 0) goto OnErrorExit;
+
+    // retreive libafb jobs epool file handle
+    int afbFd = afb_ev_mgr_get_fd();
+	if (afbFd < 0) goto OnErrorExit;
+    afb_ev_mgr_prepare();
+
+    // insert afb within nodejs libuv event loop
+    statusN = napi_get_uv_event_loop(env, &afbMain->binder.loopU);
+	if (statusN != napi_ok) goto OnErrorExit;
+
+    //add libafb epool fd into libuv pool
+ 	status = uv_poll_init(afbMain->binder.loopU, &afbMain->binder.poolU, afbFd);
+	if (status < 0) goto OnErrorExit;
+
+    // register callback handle for libafb jobs
+	status = uv_poll_start(&afbMain->binder.poolU, UV_READABLE, GlueOnPoolUvCb);
+	if (status < 0) goto OnErrorExit;
 
     // return afbMain glue as a nodejs capcule glue
     statusN= napi_create_external (env, afbMain, NULL, NULL, &resultN);
@@ -997,9 +776,198 @@ OnErrorExit:
     return NULL;
 }
 
+static napi_value GlueJobPost(napi_env env, napi_callback_info info)
+{
+    const char *errorCode="internal-error", *errorMsg="syntax: jobid=jobpost(glue,callback,delayms,[userdata])";
+    napi_value resultN;
+    napi_status statusN;
+    int64_t timeout=0;
+
+    // get argument
+    size_t argc= GLUE_FOUR_ARG;
+    napi_value args[GLUE_FOUR_ARG];
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc < GLUE_THREE_ARG || argc > GLUE_FOUR_ARG) {
+        errorCode= "invalid-arg-count";
+        goto OnErrorExit;
+    }
+
+    // retreive afb loop handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || !GlueGetApi(glue)) {
+        errorCode="invalid-afb-handle";
+        goto OnErrorExit;
+    }
+
+    // prepare handle for callback
+    GlueCallHandleT *handle=calloc (1, sizeof(GlueCallHandleT));
+    handle->magic= GLUE_POST_MAGIC;
+    handle->glue=glue;
+    handle->async.uid= napiGetString(env, args[1], "name");
+
+    statusN= napi_create_reference(env, args[1], 1, &handle->async.callbackR);
+    if (statusN != napi_ok) {
+        errorCode= "config-referencable-callback";
+        goto OnErrorExit;
+    }
+
+    statusN= napi_get_value_int64(env, args[2], &timeout);
+    if (statusN != napi_ok || napiGetType(env,args[2]) != napi_number) {
+        errorCode="Invalid-jobid-integer";
+        goto OnErrorExit;
+    }
+
+    if (argc == GLUE_FOUR_ARG) {
+        statusN= napi_create_reference(env, args[3], 1, (void*)&handle->async.userdataR);
+        if (statusN != napi_ok) {
+            errorCode= "userdata-not-referencable";
+            goto OnErrorExit;
+        }
+    }
+
+    // ms delay for OnTimerCB (timeout is dynamic and depends on CURLOPT_LOW_SPEED_TIME)
+    int jobid= afb_sched_post_job (NULL /*group*/, timeout,  0 /*exec-timeout*/,GlueJobPostCb, handle, Afb_Sched_Mode_Start);
+	if (jobid <= 0) goto OnErrorExit;
+
+    statusN=  napi_create_int64(env, jobid, &resultN);
+    if (statusN != napi_ok) goto OnErrorExit;
+
+    return resultN;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode,errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueJobCancel(napi_env env, napi_callback_info info) {
+    const char *errorCode="internal-error", *errorMsg="syntax: jobcancel(jobid)";
+    napi_status statusN;
+    int64_t jobid=0;
+    int err;
+
+    // get argument
+    size_t argc= GLUE_ONE_ARG;
+    napi_value args[GLUE_FOUR_ARG];
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_ONE_ARG) {
+        errorCode= "invalid-arg-count";
+        goto OnErrorExit;
+    }
+
+    // get jobid
+    if (statusN == napi_ok) napi_get_value_int64(env, args[1], &jobid);
+    if (statusN != napi_ok || napiGetType(env,args[2]) != napi_number) {
+        errorCode="Invalid-jobid-integer";
+        goto OnErrorExit;
+    }
+
+    err= afb_jobs_abort((int)jobid);
+    if (err) goto OnErrorExit;
+    GLUE_RETURN_NULL;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode,errorMsg);
+    GLUE_RETURN_NULL;
+}
+// this routine execute within mainloop context when binder is ready to go
+static napi_value GlueJobStart(napi_env env, napi_callback_info info)
+{
+    const char *errorCode="internal-error", *errorMsg="syntax: mainloop(callback,[timeout],[userdata])";
+    napi_value resultN;
+    napi_status statusN;
+    napi_ref callbackR=NULL, userdataR=NULL;
+    int64_t timeout=0;
+
+    // get argument
+    size_t argc= GLUE_FOUR_ARG;
+    napi_value args[GLUE_FOUR_ARG];
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc < GLUE_TWO_ARG || argc > GLUE_FOUR_ARG) {
+        errorCode= "invalid-arg-count";
+        goto OnErrorExit;
+    }
+
+    // retreive afb loop handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || !GlueGetApi(glue)) {
+        errorCode="invalid-afb-handle";
+        goto OnErrorExit;
+    }
+
+    // create a reference to prevent callback from beeing deleted
+    statusN= napi_create_reference(env, args[1], 1, &callbackR);
+    if (statusN != napi_ok || napiGetType(env, args[1]) != napi_function) {
+        errorCode="Invalid-callback-function";
+        goto OnErrorExit;
+    }
+
+    if (argc >= GLUE_TWO_ARG) {
+        if (statusN == napi_ok) napi_get_value_int64(env, args[2], &timeout);
+        if (statusN != napi_ok || napiGetType(env,args[2]) != napi_number) {
+            errorCode="Invalid-timeout-integer";
+            goto OnErrorExit;
+        }
+    }
+
+    if (argc == GLUE_THREE_ARG && napiGetType(env, args[3]) != napi_null) {
+        statusN= napi_create_reference(env, args[3], 1, &userdataR);
+        if (statusN != napi_ok) {
+            errorCode="Invalid-userdata-object";
+            goto OnErrorExit;
+        }
+    }
+
+    resultN= GlueJobStartCb (env, glue, callbackR, timeout, userdataR);
+    if (!resultN) goto OnErrorExit;
+
+    return resultN;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode,errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueGetUid(napi_env env, napi_callback_info info)
+{
+    const char *errorCode= NULL, *errorMsg = "syntax: getuid(handle)";
+    napi_status statusN;
+
+    // get arguments
+    size_t argc= GLUE_ONE_ARG;
+    napi_value resultN, args[GLUE_ONE_ARG];
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_ONE_ARG) goto OnErrorExit;
+
+    // get afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || !glue->uid) {
+        errorCode= "invalid-glue-handle";
+        goto OnErrorExit;
+    }
+
+    statusN= napi_create_string_utf8(env, glue->uid, NAPI_AUTO_LENGTH, &resultN);
+    if (statusN != napi_ok) {
+        errorCode="missing-handle-uid";
+        goto OnErrorExit;
+    }
+
+    return resultN;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
 static napi_value GlueGetConfig(napi_env env, napi_callback_info info)
 {
-    const char *errorMsg = "syntax: config(handle[,key])";
+    const char *errorCode=NULL,*errorMsg = "syntax: config(handle[,key])";
     napi_status statusN;
     napi_value configN;
     napi_ref configR;
@@ -1008,12 +976,18 @@ static napi_value GlueGetConfig(napi_env env, napi_callback_info info)
     size_t argc= GLUE_TWO_ARG;
     napi_value resultN, args[GLUE_TWO_ARG];
     statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-    if (statusN != napi_ok || (argc != GLUE_ONE_ARG && argc != GLUE_TWO_ARG)) goto OnErrorExit;
+    if (statusN != napi_ok || (argc != GLUE_ONE_ARG && argc != GLUE_TWO_ARG)) {
+        errorCode="invalid-arg-count";
+        goto OnErrorExit;
+    }
 
     // get afb glue handle from 1st argument
-    AfbHandleT *glue;
+    GlueHandleT *glue;
     statusN= napi_get_value_external (env, args[0], (void**)&glue);
-    if (statusN != napi_ok) goto OnErrorExit;
+    if (statusN != napi_ok) {
+        errorCode="invalid-handle";
+        goto OnErrorExit;
+    }
 
     // optional key within second argument
     char *key=NULL;
@@ -1021,7 +995,10 @@ static napi_value GlueGetConfig(napi_env env, napi_callback_info info)
         size_t len;
         napi_value valueN=args[1];
         statusN = napi_get_value_string_utf8(env, valueN, NULL, 0, &len);
-        if (statusN != napi_ok) goto OnErrorExit;
+        if (statusN != napi_ok) {
+            errorCode="invalid-key-string";
+            goto OnErrorExit;
+        }
         key= alloca(len+1);
         napi_get_value_string_utf8(env, valueN, key, len+1, &len);
     }
@@ -1038,21 +1015,32 @@ static napi_value GlueGetConfig(napi_env env, napi_callback_info info)
         configR = glue->timer.configR;
         break;
     case GLUE_EVT_MAGIC:
-        configR = glue->evt.configR;
+        configR = glue->event.configR;
         break;
+    case GLUE_JOB_MAGIC: {
+        GlueHandleT *handle = afb_api_get_userdata(GlueGetApi(glue));
+        if (handle->magic == GLUE_API_MAGIC) configR = handle->api.configR;
+        else configR = afbMain->binder.configR;
+        break;
+    }
+    case GLUE_RQT_MAGIC: {
+        GlueHandleT *handle = afb_api_get_userdata(GlueGetApi(glue));
+        configR = handle->api.configR;
+        break;
+    }
     default:
-        errorMsg = "GlueGetConfig: unsupported node/afb handle";
+        errorCode = "invalid-glue-handle";
         goto OnErrorExit;
     }
 
     if (!configR) {
-        errorMsg= "nodeHandle config missing";
+        errorMsg= "missing-config-reference";
         goto OnErrorExit;
     }
 
     statusN= napi_get_reference_value(glue->env, configR, &configN);
     if (statusN != napi_ok) {
-        errorMsg = "ConfigRef no attached value";
+        errorCode = "invalid-config-reference";
         goto OnErrorExit;
     }
 
@@ -1065,24 +1053,112 @@ static napi_value GlueGetConfig(napi_env env, napi_callback_info info)
     }
     else
     {
-        bool isPresent;
-        napi_value keyN;
-        statusN= napi_has_named_property (glue->env, configN, key, &isPresent);
-        if (statusN != napi_ok || !isPresent) {
-            errorMsg = "GlueGetConfig: unknown config key";
-            goto OnErrorExit;
-        }
-
-        napi_get_named_property(glue->env, configN, key, &keyN);
-        resultN= keyN;
+        resultN= napiGetElement(glue->env, configN, key);
+        if (!resultN) napi_get_null(glue->env, &resultN);
     }
     return resultN;
 
 OnErrorExit:
-    GLUE_AFB_ERROR(afbMain, "error=%s", errorMsg);
-    napi_throw_error(env, NULL, errorMsg);
+    GLUE_AFB_ERROR(afbMain, "info=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
     GLUE_RETURN_NULL;
 }
+
+static napi_value GlueClientInfo(napi_env env, napi_callback_info info)
+{
+    napi_status statusN;
+    napi_value resultN;
+    const char *errorCode=NULL, *errorMsg = "syntax: clientinfo(rqt, ['key'])";
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || (argc != GLUE_TWO_ARG && argc != GLUE_ONE_ARG)) {
+        errorCode="too-few-arguments";
+        goto OnErrorExit;
+    }
+
+    // retreive afb request handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || glue->magic != GLUE_RQT_MAGIC) {
+        errorCode="invalid-rqt-handle";
+        goto OnErrorExit;
+    }
+
+    // optional key within second argument
+    char *key=NULL;
+    if (argc == GLUE_TWO_ARG) {
+        size_t len;
+        napi_value valueN=args[1];
+        statusN = napi_get_value_string_utf8(env, valueN, NULL, 0, &len);
+        if (statusN != napi_ok) goto OnErrorExit;
+        key= alloca(len+1);
+        napi_get_value_string_utf8(env, valueN, key, len+1, &len);
+    }
+
+    json_object *clientJ= afb_req_get_client_info(glue->rqt.afb);
+    if (!clientJ) {
+        errorMsg= "(hoops) afb_req_get_client_info no session info";
+        goto OnErrorExit;
+    }
+
+    if (!key) {
+        resultN = napiJsoncToValue(env, clientJ);
+    } else {
+        json_object *keyJ= json_object_object_get(clientJ, key);
+        if (!keyJ) {
+            errorMsg= "unknown client info key";
+            goto OnErrorExit;
+        }
+        resultN = napiJsoncToValue(env, keyJ);
+    }
+    return resultN;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+static napi_value GlueIsReplyable(napi_env env, napi_callback_info info)
+{
+    const char *errorCode="internal-error", *errorMsg = "syntax: replyable(rqt)";
+    napi_status statusN;
+    napi_value  replyableN;
+    bool replyable;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_ONE_ARG) {
+        errorCode="too-many-arguments";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || glue->magic != GLUE_RQT_MAGIC) {
+        replyable=0;
+    } else {
+        replyable= !glue->rqt.replied;
+    }
+
+    statusN = napi_get_boolean(env, replyable, &replyableN);
+    return replyableN;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;}
 
 static napi_value GlueRespond(napi_env env, napi_callback_info info)
 {
@@ -1105,7 +1181,7 @@ static napi_value GlueRespond(napi_env env, napi_callback_info info)
     }
 
     // retreive afb glue handle from 1st argument
-    AfbHandleT *glue;
+    GlueHandleT *glue;
     statusN= napi_get_value_external (env, args[0], (void**)&glue);
     if (statusN != napi_ok || glue->magic != GLUE_RQT_MAGIC) {
         errorCode="invalid-rqt-handle";
@@ -1130,7 +1206,7 @@ static napi_value GlueRespond(napi_env env, napi_callback_info info)
         }
     }
     // respond request and free ressources.
-    GlueReply(glue, status, count, reply);
+    GlueAfbReply(glue, status, count, reply);
     GLUE_RETURN_NULL;
 
 OnErrorExit:
@@ -1139,61 +1215,448 @@ OnErrorExit:
     GLUE_RETURN_NULL;
 }
 
-static napi_value GluePingtest(napi_env env, napi_callback_info info)
+static napi_value GlueSleepThread(napi_env env, napi_callback_info info)
 {
     napi_status statusN;
     napi_value  resultN;
     static int64_t count=0;
     long tid= pthread_self();
-    fprintf (stderr, "From GluePingtest count=%ld tid=%ld\n", count, tid);
+    int64_t seconds;
+
+    // get argument count
+    size_t argc=0;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+    napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    fprintf (stderr, "-- Enter GlueSleepThread count=%ld tid=%ld\n", count, tid);
+
+    if (argc > 0) {
+        napi_get_value_int64 (env, args[0], &seconds);
+        if (seconds > 0) {
+            struct timespec timeout = {
+                .tv_sec = (time_t) seconds,
+                .tv_nsec=0,
+            };
+            nanosleep(&timeout, NULL);
+        }
+        fprintf (stderr, "-- Exit GlueSleepThread count=%ld tid=%ld\n\n", count, tid);
+    }
     statusN= napi_create_int64 (env, count++, &resultN);
     assert(statusN == napi_ok);
-
     return resultN;
 }
 
-/*
-static nodeMethodDef MethodsDef[] = {
-    {"config"        , GlueGetConfig          , METH_VARARGS, "Return glue handle full/partial config"},
-    {"binding"       , GlueBindingLoad      , METH_VARARGS, "Load binding an expose corresponding api/verbs"},
-    {"callasync"     , GlueAsyncCall        , METH_VARARGS, "AFB asynchronous subcall"},
-    {"callsync"      , GlueSyncCall         , METH_VARARGS, "AFB synchronous subcall"},
-    {"verbadd"       , GlueVerbAdd          , METH_VARARGS, "Add a verb to a non sealed API"},
-    {"evtsubscribe"  , GlueEventSubscribe   , METH_VARARGS, "Subscribe to event"},
-    {"evtunsubscribe", GlueEventUnsubscribe , METH_VARARGS, "Unsubscribe to event"},
-    {"evthandler"    , GlueEventHandler     , METH_VARARGS, "Register event callback handler"},
-    {"evtnew"        , GlueEventNew         , METH_VARARGS, "Create a new event"},
-    {"evtpush"       , GlueEventPush        , METH_VARARGS, "Push a given event"},
-    {"timerunref"    , GlueTimerUnref       , METH_VARARGS, "Unref existing timer"},
-    {"timeraddref"   , GlueTimerAddref      , METH_VARARGS, "Addref to existing timer"},
-    {"timernew"      , GlueTimerNew         , METH_VARARGS, "Create a new timer"},
-    {"setloa"        , GlueSetLoa           , METH_VARARGS, "Set LOA (LevelOfAssurance)"},
-    {"schedwait"     , GlueSchedWait        , METH_VARARGS, "Register a mainloop waiting lock"},
-    {"schedunlock"   , GlueSchedUnlock      , METH_VARARGS, "Unlock schedwait"},
-    {"schedpost"     , GlueSchedPost        , METH_VARARGS, "Post a job after timeout(ms)"},
-    {"schedcancel"   , GlueSchedCancel      , METH_VARARGS, "Cancel a schedpost timer"},
-    {"clientinfo"    , GlueClientInfo       , METH_VARARGS, "Return seesion info about client"},
-    {"exit"          , GlueExit             , METH_VARARGS, "Exit binder with statusN"},
 
-    {NULL}  // sentinel
-};
-*/
+static napi_value GlueExit(napi_env env, napi_callback_info info)
+{
+    const char *errorCode=NULL, *errorMsg= "syntax: exit(handle, statusN)";
+    napi_status statusN;
+    int64_t exitCode=-1;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_TWO_ARG) {
+        errorCode="too-few-arguments";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok) {
+        errorCode="invalid-glue-handle";
+        goto OnErrorExit;
+    }
+
+    statusN= napi_get_value_int64 (env, args[1], &exitCode);
+    if (statusN != napi_ok) {
+        errorCode="invalid-status-integer";
+        goto OnErrorExit;
+    }
+
+    AfbBinderExit(afbMain->binder.afb, (int)exitCode);
+    GLUE_RETURN_NULL;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueSetLoa(napi_env env, napi_callback_info info)
+{
+    const char *errorCode=NULL, *errorMsg = "syntax: setloa(rqt, newloa)";
+    napi_status statusN;
+    int64_t loa=0;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_TWO_ARG) {
+        errorCode="too-few-arguments";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || glue->magic != GLUE_RQT_MAGIC) {
+        errorCode="invalid-rqt-handle";
+        goto OnErrorExit;
+    }
+
+    statusN= napi_get_value_int64 (env, args[1], &loa);
+    if (statusN != napi_ok) {
+        errorCode="invalid-status-integer";
+        goto OnErrorExit;
+    }
+
+    int err= afb_req_session_set_LOA(glue->rqt.afb, (int)loa);
+    if (err < 0) {
+        errorMsg="Invalid Rqt Session";
+        goto OnErrorExit;
+    }
+
+    GLUE_RETURN_NULL;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueBindingLoad(napi_env env, napi_callback_info info)
+{
+    const char *errorCode=NULL, *errorMsg =  "syntax: binding(config)";
+    napi_status statusN;
+
+    if (!afbMain) {
+        errorCode="binder-not-initialized";
+        goto OnErrorExit;
+    }
+
+    // get argument
+    size_t argc= GLUE_ONE_ARG;
+    napi_value args[GLUE_ONE_ARG];
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_ONE_ARG) goto OnErrorExit;
+
+    json_object *configJ= napiValuetoJsonc(env, args[0]);
+    if (!configJ) {
+        errorCode="Invalid-Config";
+        goto OnErrorExit;
+    }
+
+    errorCode = AfbBindingLoad(afbMain->binder.afb, configJ);
+    if (errorCode) goto OnErrorExit;
+
+    GLUE_RETURN_NULL;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueVerbAdd(napi_env env, napi_callback_info info)
+{
+    const char *errorCode=NULL, *errorMsg = "syntax: addverb(api, config, context)";
+    napi_status statusN;
+
+    // get arguments
+    size_t argc= GLUE_THREE_ARG;
+    napi_value args[GLUE_ONE_ARG];
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc != GLUE_THREE_ARG) goto OnErrorExit;
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok || glue->magic != GLUE_API_MAGIC) {
+        errorCode="invalid-api-handle";
+        goto OnErrorExit;
+    }
+
+    json_object *configJ= napiValuetoJsonc(env, args[1]);
+    if (!configJ) {
+        errorCode="Invalid-Config";
+        goto OnErrorExit;
+    }
+
+    // create a reference to prevent userdata from beeing deleted
+    napi_ref userdataR;
+    statusN= napi_create_reference(env, args[2], 1, &userdataR);
+    if (statusN != napi_ok) goto OnErrorExit;
+
+    AfbVcbDataT *vcbData= calloc (1, sizeof(AfbVcbDataT));
+    vcbData->magic= (void*)AfbAddVerbs;
+    vcbData->configJ= configJ;
+    vcbData->userdata= (void*)
+    json_object_get(vcbData->configJ);
+
+    errorCode= AfbAddOneVerb (afbMain->binder.afb, glue->api.afb, configJ, GlueRqtVerbCb, vcbData);
+    if (errorCode) goto OnErrorExit;
+
+    GLUE_RETURN_NULL;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueCallAsync(napi_env env, napi_callback_info info)
+{
+    const char  *errorCode="internal-error", *errorMsg= "syntax: callasync(handle, api, verb, callback, context, ...)";
+    napi_status statusN;
+    json_object *valueJ;
+    int count=0;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc < GLUE_FIVE_ARG) {
+        errorCode="too-few-arguments";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok) {
+        errorCode="invalid-rqt-handle";
+        goto OnErrorExit;
+    }
+
+    // retreive API and VERB string
+    size_t len;
+    char apiname[API_MAX_LEN];
+    char verbname[VERB_MAX_LEN];
+    statusN = napi_get_value_string_utf8(env, args[1], apiname, API_MAX_LEN, &len);
+    if (statusN != napi_ok || len == API_MAX_LEN) {
+        errorCode="apiname-too-long";
+        goto OnErrorExit;
+    }
+    statusN = napi_get_value_string_utf8(env, args[2], verbname, VERB_MAX_LEN, &len);
+    if (statusN != napi_ok || len == VERB_MAX_LEN) {
+        errorCode="verbname-too-long";
+        goto OnErrorExit;
+    }
+
+    // prepare callback userdata handle
+    GlueCallHandleT *handle= calloc(1,sizeof(GlueCallHandleT));
+    handle->magic= GLUE_CALL_MAGIC;
+    handle->glue=glue;
+    asprintf (&handle->async.uid, "%s/%s", apiname, verbname);
+
+    statusN= napi_create_reference(env, args[3], 1, &handle->async.callbackR);
+    if (statusN != napi_ok  || napiGetType(env, args[3]) != napi_function) goto OnErrorExit;
+
+    // create a reference to prevent userdata from beeing deleted
+    statusN= napi_create_reference(env, args[4], 1, &handle->async.userdataR);
+    if (statusN != napi_ok) {
+        errorCode="context-not-object";
+        goto OnErrorExit;
+    }
+
+    int nparams= (int)argc-GLUE_FIVE_ARG;
+    afb_data_t *params=NULL;
+    if (nparams > 0) {
+        params= alloca(sizeof(afb_data_t*)*nparams);
+        for (int idx= 0 ; idx < nparams; idx++) {
+            valueJ = napiValuetoJsonc(glue->env, args[idx+GLUE_FIVE_ARG]);
+            if (!valueJ)  goto OnErrorExit;
+            afb_create_data_raw(&params[count], AFB_PREDEFINED_TYPE_JSON_C, valueJ, 0, (void *)json_object_put, valueJ);
+            count++;
+        }
+    }
+
+    switch (glue->magic) {
+        case GLUE_RQT_MAGIC:
+            afb_req_subcall (glue->rqt.afb, apiname, verbname, nparams, params, afb_req_subcall_catch_events, GlueRqtSubcallCb, (void*)handle);
+            break;
+        default:
+            afb_api_call(GlueGetApi(glue), apiname, verbname, nparams, params, GlueApiSubcallCb, (void*)handle);
+    }
+    GLUE_RETURN_NULL;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
+static napi_value GlueCallSync(napi_env env, napi_callback_info info)
+{
+    const char *errorCode="internal-error", *errorMsg= "syntax: callsync(handle, api, verb, ...)";
+    napi_status statusN;
+    json_object *valueJ;
+    int status, err, count=0;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc < GLUE_THREE_ARG) {
+        errorCode="too-few-arguments";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok) {
+        errorCode="invalid-rqt-handle";
+        goto OnErrorExit;
+    }
+
+    // retreive API and VERB string
+    size_t len;
+    char apiname[API_MAX_LEN];
+    char verbname[VERB_MAX_LEN];
+    statusN = napi_get_value_string_utf8(env, args[1], apiname, API_MAX_LEN, &len);
+    if (statusN != napi_ok || len == API_MAX_LEN) {
+        errorCode="apiname-too-long";
+        goto OnErrorExit;
+    }
+    statusN = napi_get_value_string_utf8(env, args[2], verbname, VERB_MAX_LEN, &len);
+    if (statusN != napi_ok || len == VERB_MAX_LEN) {
+        errorCode="verbname-too-long";
+        goto OnErrorExit;
+    }
+
+    int nparams= (int)argc-GLUE_THREE_ARG;
+    afb_data_t *params=NULL;
+    if (nparams > 0) {
+        params= alloca(sizeof(afb_data_t*)*nparams);
+        for (int idx= 0 ; idx < nparams; idx++) {
+            valueJ = napiValuetoJsonc(glue->env, args[idx+GLUE_THREE_ARG]);
+            if (!valueJ)  goto OnErrorExit;
+            afb_create_data_raw(&params[count], AFB_PREDEFINED_TYPE_JSON_C, valueJ, 0, (void *)json_object_put, valueJ);
+            count++;
+        }
+    }
+    unsigned nreplies= SUBCALL_MAX_RPLY;
+    afb_data_t replies[SUBCALL_MAX_RPLY];
+
+    switch (glue->magic) {
+        case GLUE_RQT_MAGIC:
+            err= afb_req_subcall_sync (glue->rqt.afb, apiname, verbname, nparams, params, afb_req_subcall_catch_events, &status, &nreplies, replies);
+            break;
+        default:
+            err= afb_api_call_sync (GlueGetApi(glue), apiname, verbname, nparams, params, &status, &nreplies, replies);
+    }
+
+    if (err) {
+        status = err;
+        errorCode= "api subcall fail";
+        goto OnErrorExit;
+    }
+    // subcall was refused
+    if (AFB_IS_BINDER_ERRNO(status)) {
+        errorCode= afb_error_text(status);
+        goto OnErrorExit;
+    }
+
+    // create response
+    napi_value resultN, slotN, argsN;
+    statusN = napi_create_object(env, &resultN);
+
+    // status is first element of response array
+    statusN= napi_create_int64(env, (int64_t)status, &slotN);
+	if (statusN != napi_ok) goto OnErrorExit;
+	statusN = napi_set_named_property(env, resultN, "status", slotN);
+	if (statusN != napi_ok) goto OnErrorExit;
+
+    // push afb replies into a node array as response
+    napi_value *repliesN= alloca (sizeof (napi_value) *nreplies);
+    errorMsg= napiPushAfbArgs (env, repliesN, 0, nreplies, replies);
+    if (errorMsg) goto OnErrorExit;
+
+    statusN= napi_create_array_with_length(env, nreplies, &argsN);
+	if (statusN != napi_ok) goto OnErrorExit;
+
+    for (int idx=0; idx < nreplies; idx++) {
+        if (repliesN[idx]) statusN = napi_set_element(env, argsN, idx, repliesN[idx]);
+        if (statusN != napi_ok) goto OnErrorExit;
+    }
+	statusN = napi_set_named_property(env, resultN, "args", argsN);
+	if (statusN != napi_ok) goto OnErrorExit;
+
+    return resultN;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
 
 // NodeJS NAPI module initialisation
 static napi_value NapiGlueInit(napi_env env, napi_value exports) {
   napi_status statusN;
   napi_property_descriptor descs[] = {
-    {"info"    , NULL, GluePrintInfo    , NULL, NULL, NULL, napi_default, NULL },
-    {"error"   , NULL, GluePrintError   , NULL, NULL, NULL, napi_default, NULL },
-    {"debug"   , NULL, GluePrintDebug   , NULL, NULL, NULL, napi_default, NULL },
-    {"warning" , NULL, GluePrintWarning , NULL, NULL, NULL, napi_default, NULL },
-    {"notice"  , NULL, GluePrintNotice  , NULL, NULL, NULL, napi_default, NULL },
-    {"ping"    , NULL, GluePingtest     , NULL, NULL, NULL, napi_default, NULL },
-    {"binder"  , NULL, GlueBinderConf   , NULL, NULL, NULL, napi_default, NULL },
-    {"apiadd"  , NULL, GlueApiCreate    , NULL, NULL, NULL, napi_default, NULL },
-    {"mainloop", NULL, GlueMainLoop     , NULL, NULL, NULL, napi_default, NULL },
-    {"config"  , NULL, GlueGetConfig    , NULL, NULL, NULL, napi_default, NULL },
-    {"reply"   , NULL, GlueRespond      , NULL, NULL, NULL, napi_default, NULL },
+    {"info"          , NULL, GluePrintInfo     , NULL, NULL, NULL, napi_default, NULL },
+    {"error"         , NULL, GluePrintError    , NULL, NULL, NULL, napi_default, NULL },
+    {"debug"         , NULL, GluePrintDebug    , NULL, NULL, NULL, napi_default, NULL },
+    {"warning"       , NULL, GluePrintWarning  , NULL, NULL, NULL, napi_default, NULL },
+    {"notice"        , NULL, GluePrintNotice   , NULL, NULL, NULL, napi_default, NULL },
+    {"sleep"         , NULL, GlueSleepThread   , NULL, NULL, NULL, napi_default, NULL },
+    {"binder"        , NULL, GlueBinderConf    , NULL, NULL, NULL, napi_default, NULL },
+    {"binding"       , NULL, GlueBindingLoad   , NULL, NULL, NULL, napi_default, NULL },
+    {"apiadd"        , NULL, GlueApiCreate     , NULL, NULL, NULL, napi_default, NULL },
+    {"verbadd"       , NULL, GlueVerbAdd       , NULL, NULL, NULL, napi_default, NULL },
+    {"config"        , NULL, GlueGetConfig     , NULL, NULL, NULL, napi_default, NULL },
+    {"clientinfo"    , NULL, GlueClientInfo    , NULL, NULL, NULL, napi_default, NULL },
+    {"reply"         , NULL, GlueRespond       , NULL, NULL, NULL, napi_default, NULL },
+    {"exit"          , NULL, GlueExit          , NULL, NULL, NULL, napi_default, NULL },
+    {"setloa"        , NULL, GlueSetLoa        , NULL, NULL, NULL, napi_default, NULL },
+    {"callasync"     , NULL, GlueCallAsync     , NULL, NULL, NULL, napi_default, NULL },
+    {"callsync"      , NULL, GlueCallSync      , NULL, NULL, NULL, napi_default, NULL },
+    {"replyable"     , NULL, GlueIsReplyable   , NULL, NULL, NULL, napi_default, NULL },
+    {"evtsubscribe"  , NULL, GlueEvtSubscribe  , NULL, NULL, NULL, napi_default, NULL },
+    {"evtunsubscribe", NULL, GlueEvtUnsubscribe, NULL, NULL, NULL, napi_default, NULL },
+    {"evthandler"    , NULL, GlueEvtHandler    , NULL, NULL, NULL, napi_default, NULL },
+    {"evtnew"        , NULL, GlueEvtNew        , NULL, NULL, NULL, napi_default, NULL },
+    {"evtpush"       , NULL, GlueEvtPush       , NULL, NULL, NULL, napi_default, NULL },
+    {"timerunref"    , NULL, GlueTimerUnref    , NULL, NULL, NULL, napi_default, NULL },
+    {"timeraddref"   , NULL, GlueTimerAddref   , NULL, NULL, NULL, napi_default, NULL },
+    {"timernew"      , NULL, GlueTimerNew      , NULL, NULL, NULL, napi_default, NULL },
+    {"jobpost"       , NULL, GlueJobPost       , NULL, NULL, NULL, napi_default, NULL },
+    {"jobcancel"     , NULL, GlueJobCancel     , NULL, NULL, NULL, napi_default, NULL },
+    {"jobkill"       , NULL, GlueJobKill       , NULL, NULL, NULL, napi_default, NULL },
+    {"jobstart"      , NULL, GlueJobStart      , NULL, NULL, NULL, napi_default, NULL },
+    {"jobstatus"     , NULL, GlueJobStatus     , NULL, NULL, NULL, napi_default, NULL },
+    {"getuid"        , NULL, GlueGetUid        , NULL, NULL, NULL, napi_default, NULL },
+    // promisses pour les call async
+
+ /*
+
+   call async avec promise
+
+    - si pas de callback async dans la config
+      * creer une promise
+      * la retourner à l'appellant
+      * sur resolution la resoudre
+      * creer un object de retour de promise type {status:xx error:xxx args:[]}
+*/
+
   };
 
   statusN = napi_define_properties(env, exports, sizeof(descs)/sizeof(napi_property_descriptor), descs);

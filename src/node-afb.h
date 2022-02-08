@@ -25,30 +25,21 @@
 #include <libafb/sys/verbose.h>
 
 #include "glue-afb.h"
+#include "js_native_api_types.h"
 #include <node_api.h>
+#include <uv.h>
+
 #include <json-c/json.h>
 
 #define SUBCALL_MAX_RPLY 8
+#define API_MAX_LEN  256
+#define VERB_MAX_LEN 256
+#define LABEL_MAX_LEN 128
 
-typedef enum {
-    GLUE_NO_ARG=0,
-    GLUE_ONE_ARG=1,
-    GLUE_TWO_ARG=2,
-    GLUE_THREE_ARG=3,
-    GLUE_FOUR_ARG=4,
-    GLUE_FIVE_ARG=5,
-    GLUE_SIX_ARG=6,
-} NAPINumberFixArgs;
-
-typedef enum {
-    GLUE_BINDER_MAGIC=936714582,
-    GLUE_API_MAGIC=852951357,
-    GLUE_RQT_MAGIC=684756123,
-    GLUE_EVT_MAGIC=894576231,
-    GLUE_TIMER_MAGIC=4628170,
-    GLUE_LOCK_MAGIC=379645852,
-    GLUE_SCHED_MAGIC=73498127,
-} napiGlueMagicsE;
+#define GLUE_RETURN_NULL { \
+    napi_value resultN; \
+    napi_get_null(env, &resultN); \
+    return resultN; }
 
 // compiled AFB verb context data
 typedef struct {
@@ -62,20 +53,21 @@ struct napiBinderHandleS {
     AfbBinderHandleT *afb;
     napi_ref configR;
     struct evmgr *evmgr;
+    uv_loop_t *loopU;
+    uv_poll_t poolU;
 };
 
-struct napiSchedWaitS {
+typedef struct {
+    char *uid;
+    napi_env env;
     napi_ref callbackR;
-    napi_ref userDataR;
-    struct afb_sched_lock *afb;
-    afb_api_t  apiv4;
-    long status;
-};
+    napi_ref userdataR;
+} GlueAsyncCtxT;
 
 struct napiApiHandleS {
     afb_api_t  afb;
-    napi_ref ctrlCbR;
     napi_ref configR;
+    GlueAsyncCtxT *async;
 };
 
 struct napiRqtHandleS {
@@ -84,52 +76,58 @@ struct napiRqtHandleS {
     afb_req_t afb;
 };
 
-struct napiTimerHandleS {
-    const char *uid;
-    afb_timer_t afb;
-    napi_ref callbackR;
-    napi_ref configR;
-    napi_ref userDataR;
-    int usage;
-};
-
-struct napiEvtHandleS {
-    const char *uid;
-    const char *name;
+struct napiEventHandleS {
     afb_event_t afb;
-    napi_ref configR;
     afb_api_t apiv4;
-    int count;
+    char *pattern;
+    napi_ref configR;
+    GlueAsyncCtxT async;
 };
 
-struct napiHandlerHandleS {
-    const char *uid;
-    napi_ref callbackR;
-    napi_ref configR;
-    napi_ref userDataR;
+struct napiTimerHandleS {
+    afb_timer_t afb;
     afb_api_t apiv4;
-    int count;
+    napi_ref configR;
+    GlueAsyncCtxT async;
+};
+
+struct napiPostHandleS {
+    afb_api_t apiv4;
+    napi_ref configR;
+    GlueAsyncCtxT async;
+};
+
+struct napiJobHandleS {
+    int64_t status;
+    napi_deferred deferred;
+    int64_t timeout;
+    sem_t sem;
+    afb_api_t apiv4;
 };
 
 typedef struct {
-    napiGlueMagicsE magic;
+    GlueHandleMagicsE magic;
+    GlueAsyncCtxT* onError;
+    int usage;
     napi_env env;
+    char *uid;
     union {
         struct napiBinderHandleS binder;
-        struct napiEvtHandleS evt;
         struct napiApiHandleS api;
         struct napiRqtHandleS rqt;
         struct napiTimerHandleS timer;
-        struct napiSchedWaitS lock;
-        struct napiHandlerHandleS handler;
+        struct napiEventHandleS event;
+        struct napiPostHandleS post;
+        struct napiJobHandleS job;
     };
-} AfbHandleT;
+} GlueHandleT;
 
-typedef struct {
-    int magic;
-    AfbHandleT *handle;
-    napi_ref callbackR;
-    napi_ref userDataR;
-} GlueHandleCbT;
 
-extern AfbHandleT *afbMain;
+typedef struct  {
+    GlueHandleMagicsE magic;
+    GlueHandleT *glue;
+    GlueAsyncCtxT async;
+} GlueCallHandleT;
+
+
+extern GlueHandleT *afbMain;

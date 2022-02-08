@@ -1,130 +1,169 @@
-#!/usr/bin/nodejs3
+#!/usr/bin/node
 
-
-"""
-Conoderight 2021 Fulup Ar Foll fulup@iot.bzh
+/*
+Copyright 2021 Fulup Ar Foll fulup@iot.bzh
 Licence: $RP_BEGIN_LICENSE$ SPDX:MIT https://opensource.org/licenses/MIT $RP_END_LICENSE$
 
 object:
-    subcall-api.node
-    - 1st load helloworld binding
-    - 2nd create a 'demo' api requiring 'helloworld' api
-    - 3rd check helloworld/ping is responsing before exposing http service (mainLoopCb)
-    - 4rd implement two verbs demo/sync|async those two verb subcall helloworld/testargs in synchronous/asynchronous mode
-    demo/synbc|async can be requested from REST|websocket from a browser on http:localhost:1234
+    subcall-api.py
+    - 1) load helloworld binding
+    - 2) create a 'demo' api requiring 'helloworld' api
+    - 3) check helloworld/ping is responsing before exposing http service (mainLoopCb)
+    - 4) implement two verbs demo/sync|async those two verb subcall helloworld/testargs in synchronous/asynchronous mode
+    - 5) subscribe event request timer event from helloworld-event api
+    demo/sync|async|subscribe|unsubscribe can be requested from REST|websocket from a browser on http:localhost:1234
 
 usage
-    - from dev tree: LD_LIBRARY_PATH=../afb-libglue/build/src/ node samples/subcall-api.node
+    - from dev tree: LD_LIBRARY_PATH=../afb-libglue/build/src/ nodejs samples/simple-api.nodejs
     - point your browser at http://localhost:1234/devtools
 
 config: following should match your installation paths
     - devtools alias should point to right path alias= {'/devtools:/usr/share/afb-ui-devtools/binder'},
-    - nodejsPATH:'/my-node-module-path' (to _afbnodeglue.so)
-    - LD_LIBRARY_PATH:'/my-glulib-path' (to libafb-glue.so
+    - nodejsPATH='/my-node-module-path' (to _afbnodeglue.so)
+    - LD_LIBRARY_PATH='/my-glulib-path' (to libafb-glue.so
+*/
+'use strict';
 
-"""
+// find and import libafb module
+process.env.NODE_PATH='./build/src';
+require("module").Module._initPaths();
+var libafb=require('afbnodeglue');
 
-# import libafb nodejs glue
-from afbnodeglue import libafb
-import os
+//import libafb nodejs glue
+var libafb=require('afbnodeglue');
 
-## static variables
-count=0
+// static variables
+global.count=0
 
-## ping/pong test func
-def pingCB(rqt, *args):
-    global count
-    count += 1
-    libafb.notice  (rqt, "From pingCB count=%d", count)
-    return (0, {"pong":count}) # implicit response
+// ping/pong test func
+function pingTestCB(rqt, ...args) {
+    global.count += 1;
+    libafb.notice  (rqt, "From pingTestCB count=%d", count);
+    return [0, {"pong":count}]; // implicit response
+}
 
-def asyncRespCB(rqt, status, ctx, *args):
+function helloEventCB (api, name, ...data) {
+    libafb.notice  (api, "helloEventCB name=%s received", name)
+}
+
+function otherEventCB (api, name, ...data) {
+    libafb.notice  (api, "otherEventCB name=%s data=%s", name, data)
+}
+
+function asyncRespCB(rqt, status, ctx, ...args) {
     libafb.notice  (rqt, "asyncRespCB status=%d ctx:'%s', response:'%s'", status, ctx, args)
     libafb.reply (rqt, status, 'async helloworld/testargs', args)
+}
 
-def syncCB(rqt, *args):
-    libafb.notice  (rqt, "syncCB calling helloworld/testargs *args=%s", args)
-    status= libafb.callsync(rqt, "helloworld","testargs", args[0])[0]
-
-    if status != 0:
-        libafb.reply (rqt, status, 'async helloworld/testargs fail')
-    else:
-        libafb.reply (rqt, status, 'async helloworld/testargs success')
-
-def asyncCB(rqt, *args):
-    userdata= "context-user-data"
-    libafb.notice  (rqt, "asyncCB calling helloworld/testargs *args=%s", args)
+function asyncCB(rqt, ...args) {
+    var userdata= {'userdata':"context-user-data"} // any object(rqt, argument, ...) to be used as userdata
+    libafb.notice  (rqt, "asyncCB calling helloworld/testargs ...args=%s", args)
     libafb.callasync (rqt,"helloworld", "testargs", asyncRespCB, userdata, args[0])
-    # response within 'asyncRespCB' callback
+    // response within 'asyncRespCB' callback
+}
 
-# api control function
-def startApiCb(api, action):
-    apiname= libafb.config(api, "api")
-    libafb.notice(api, "api=[%s] action=[%s]", apiname, action)
+function syncCB(rqt, ...args) {
+    libafb.notice  (rqt, "syncCB calling helloworld/testargs ...args=%s", args)
+    var response= libafb.callsync(rqt, "helloworld","testargs", args[0])
 
-    if action == 'config':
-        libafb.notice(api, "config=%s", libafb.config(api))
+    if (response.status !== 0) libafb.reply (rqt, response.status, 'async helloworld/testargs fail')
+    else libafb.reply (rqt, response.status, 'async helloworld/testargs success')
+}
 
-    return 0 # ok
+// api control function
+function controlApiCB(api, state) {
+    var apiname= libafb.config(api, "api")
+    libafb.notice(api, "api=[%s] state=[%s]", apiname, state)
 
-# executed when binder and all api/interfaces are ready to serv
-def mainLoopCb(binder):
-    libafb.notice(binder, "mainLoopCb=[%s]", libafb.config(binder, "uid"))
+    if (state == 'config') {
+        libafb.notice(api, "config=%s", libafb.getuid(api))
+    }
+    return 0 // ok
+}
 
-    # callsync return a tuple (status is [0])
-    status= libafb.callsync(binder, "helloworld", "ping")[0]
-    if status != 0:
-        # force an explicit response
-        libafb.notice  (binder, "helloworld/ping fail status=%d", status)
+// called when an api/verb|event callback fail within node
+function errorTestCB(rqt, uid, error, ...args) {
+    libafb.error (rqt, "FATAL: uid=%s info=%s args=%s", uid, error.message, args);
 
-    return status # negative status force mainloop exit
+    if (libafb.config(rqt, 'verbose')) {
+        console.log('\nuid:' + uid + ' Stacktrace:')
+        console.log('==============================')
+        console.log(error.stack);
+    }
 
-# api verb list
-demoVerbs = [
-    {'uid':'node-ping'    , 'verb':'ping' , 'callback':pingCB , 'info':'node ping demo function'},
+    if (libafb.replyable(rqt)) {
+        var stack = error.stack.split("\n");
+        libafb.reply (rqt, -1, {'uid':uid, 'info': error.message, 'trace': stack[1].substring(7)});
+    }
+}
+
+// executed when binder and all api/interfaces are ready to serv
+function jobstartCB(job) {
+    var status;
+    libafb.notice(job, "jobstartCB=[%s]", libafb.getuid(job))
+
+    var response= libafb.callsync(job, "helloworld", "ping")
+    if (response.status === 0) status=1 
+    else status=-1
+    libafb.notice (job, "helloworld/ping status=%d", status)
+    return status // returning 0 would wait for an explicit libafb.jobkill(status)
+}
+
+// verbs callback list
+var demoVerbs = [
+    {'uid':'node-ping'    , 'verb':'ping' , 'callback':pingTestCB , 'info':'node ping demo function'},
     {'uid':'node-synccall', 'verb':'sync' , 'callback':syncCB , 'info':'synchronous subcall of private api' , 'sample':[{'cezam':'open'}, {'cezam':'close'}]},
     {'uid':'node-asyncall', 'verb':'async', 'callback':asyncCB, 'info':'asynchronous subcall of private api', 'sample':[{'cezam':'open'}, {'cezam':'close'}]},
 ]
 
-# define and instanciate API
-demoApi = {
+// events callback list
+var demoEvents = [
+    {'uid':'py-event' , 'pattern':'helloworld-event/timerCount', 'callback':helloEventCB , 'info':'timer event handler'},
+    {'uid':'py-other' , 'pattern':'*', 'callback':otherEventCB , 'info':'any other event handler'},
+]
+
+// functionine and instantiate API
+var demoApi = {
     'uid'     : 'node-demo',
     'api'     : 'demo',
-    'provide' : 'test',
-    'info'    : 'node api demo',
+    'class'   : 'test',
+    'info'    : 'node subcall demo',
     'verbose' : 9,
     'export'  : 'public',
     'require' : 'helloworld',
-    'control' : startApiCb,
     'verbs'   : demoVerbs,
+    'events'  : demoEvents,
+    'control' : controlApiCB,
+    'alias'   : ['/devtools:/usr/share/afb-ui-devtools/binder'],
 }
 
-# helloworld binding sample definition
-hellowBinding = {
+// helloworld binding sample functioninition
+var HelloBinding = {
     'uid'    : 'helloworld',
     'export' : 'private',
     'path'   : 'afb-helloworld-skeleton.so',
-    'ldpath' : [os.getenv('HOME') + '/opt/helloworld-binding/lib','/usr/local/helloworld-binding/lib'],
-    'alias'  : ['/hello:'+os.getenv("HOME")+'/opt/helloworld-binding/htdocs','/devtools:/usr/share/afb-ui-devtools/binder'],
 }
 
-# define and instanciate libafb-binder
-demoOpts = {
+var EventBinding = {
+    'uid'    : 'helloworld',
+    'export' : 'private',
+    'path'   : 'afb-helloworld-subscribe-event.so',
+}
+
+// functionine and instantiate libafb-binder
+var demoOpts = {
     'uid'     : 'node-binder',
     'port'    : 1234,
     'verbose' : 9,
     'roothttp': './conf.d/project/htdocs',
     'rootdir' : '.',
+    'ldpath' : [process.env.HOME + '/opt/helloworld-binding/lib','/usr/local/helloworld-binding/lib'],
+    'alias'  : ['/devtools:/usr/share/afb-ui-devtools/binder'],
+    'onerror' : errorTestCB,
 }
 
-# create and start binder
-binder= libafb.binder(demoOpts)
-hello = libafb.binding(hellowBinding)
-glue= libafb.apiadd(demoApi)
-
-# should never return
-status= libafb.mainloop(mainLoopCb)
-if status < 0:
-    libafb.error (binder, "OnError MainLoop Exit")
-else:
-    libafb.notice(binder, "OnSuccess Mainloop Exit")
+libafb.binder(demoOpts);
+libafb.binding(HelloBinding)
+libafb.binding(EventBinding)
+libafb.apiadd(demoApi);
+console.log ("### nodejs running ###")

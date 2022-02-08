@@ -1,5 +1,5 @@
 /*
- * Conoderight (C) 2015-2021 IoT.bzh Company
+ * Copyright (C) 2015-2021 IoT.bzh Company
  * Author: Fulup Ar Foll <fulup@iot.bzh>
  *
  * $RP_BEGIN_LICENSE$
@@ -22,10 +22,6 @@
  */
 
 #include <node_api.h>
-
-#include <stdio.h>
-#include <string.h>
-#include <assert.h>
 #include <wrap-json.h>
 
 #include "node-afb.h"
@@ -34,29 +30,15 @@
 #include <glue-afb.h>
 #include <glue-utils.h>
 
-
-typedef struct {
-    AfbHandleT  *glue;
-    napi_value callbackP;
-    napi_value userdataP;
-} nodeAsyncCtxT;
-
-/*
-
+void GlueTimerCb (afb_timer_x4_t timer, void *userdata, int decount);
 void GlueApiSubcallCb(void *userdata, int status, unsigned nreplies, afb_data_t const replies[], afb_api_t api);
 void GlueRqtSubcallCb(void *userdata, int status, unsigned nreplies, afb_data_t const replies[], afb_req_t req);
-
-void GlueTimerCb (afb_timer_x4_t timer, void *userdata, int decount);
-void GlueTimerClear(AfbHandleT *glue);
-
-void GlueSchedTimeoutCb (int signum, void *userdata);
-void GlueSchedWaitCb (int signum, void *userdata, struct afb_sched_lock *afbLock);
-
-*/
-
-void GlueEvtHandlerCb(void *userdata, const char *event_name,	unsigned nparams, afb_data_x4_t const params[],	afb_api_t api);
+void GlueEventCb(void *userdata, const char *event_name,	unsigned nparams, afb_data_x4_t const params[],	afb_api_t api);
 void GlueInfoCb(afb_req_t afbRqt, unsigned nparams, afb_data_t const params[]);
-void GlueVerbCb(afb_req_t afbRqt, unsigned nparams, afb_data_t const params[]);
 int  GlueStartupCb(void *config, void *userdata);
 int  GlueCtrlCb(afb_api_t apiv4, afb_ctlid_t ctlid, afb_ctlarg_t ctlarg, void *userdata);
-void GlueAsyncVerbCb(afb_req_t afbRqt, unsigned nparams, afb_data_t const params[]);
+void GlueRqtVerbCb(afb_req_t afbRqt, unsigned nparams, afb_data_t const params[]);
+napi_value GlueJobStartCb (napi_env env, GlueHandleT *glue, napi_ref callbackR, int64_t timeout, napi_ref userdataR);
+void GlueJobPostCb (int signum, void *userdata);
+void GlueFreeHandleCb(napi_env env, GlueHandleT *handle);
+void GlueFreeExternalCb (napi_env env, void* data, void* hint);

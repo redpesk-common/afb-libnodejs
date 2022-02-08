@@ -1,5 +1,5 @@
 ###########################################################################
-# Conoderight 2017 IoT.bzh
+# Copyright 2017 IoT.bzh
 #
 # author: Fulup Ar Foll <fulup@iot.bzh>
 #

@@ -29,10 +29,10 @@
 #define GLUE_AFB_WARNING(Glue,...) GlueVerbose (Glue,AFB_SYSLOG_LEVEL_WARNING,__file__,__LINE__,__func__,__VA_ARGS__)
 #define GLUE_AFB_ERROR(Glue,...)   GlueVerbose (Glue,AFB_SYSLOG_LEVEL_ERROR,__file__,__LINE__,__func__,__VA_ARGS__)
 
-afb_api_t GlueGetApi(AfbHandleT*glue);
-void GlueVerbose(AfbHandleT *handle, int level, const char *file, int line, const char *func, const char *fmt, ...);
+afb_api_t GlueGetApi(GlueHandleT*glue);
+void GlueVerbose(GlueHandleT *handle, int level, const char *file, int line, const char *func, const char *fmt, ...);
 void GlueRqtFree(void *userdata);
-void GlueRqtAddref(AfbHandleT *glue);
-void GlueRqtUnref(AfbHandleT *glue);
-AfbHandleT *GlueRqtNew(afb_req_t afbRqt);
+void GlueRqtAddref(GlueHandleT *glue);
+void GlueRqtUnref(GlueHandleT *glue);
+GlueHandleT *GlueRqtNew(afb_req_t afbRqt);
 void GlueInfoCb(afb_req_t afbRqt, unsigned nparams, afb_data_t const params[]);

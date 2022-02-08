@@ -1,5 +1,5 @@
 /*
- * Conoderight (C) 2015-2021 IoT.bzh Company
+ * Copyright (C) 2015-2021 IoT.bzh Company
  * Author: Fulup Ar Foll <fulup@iot.bzh>
  *
  * $RP_BEGIN_LICENSE$
@@ -20,7 +20,8 @@
  *  https://www.gnu.org/licenses/gpl-3.0.html.
  * $RP_END_LICENSE$
  */
-
+#include "json_object.h"
+#define _GNU_SOURCE
 #include <node_api.h>
 
 #include <stdio.h>
@@ -36,14 +37,16 @@
 
 #define GLUE_GLUE_MAX_LABEL 256
 
-static void napiFreeJsonCtx (json_object *configJ, void *userdata) {
-    napiJsoncUserDataT *napi= (napiJsoncUserDataT*) userdata;
-    napi_delete_reference(napi->env, napi->ref);
-    free (userdata);
+static void freeJsonCtx (json_object *configJ, void *userdata) {
+    GlueAsyncCtxT *async= (GlueAsyncCtxT*) userdata;
+    if(async->callbackR) napi_delete_reference(async->env, async->callbackR);
+    if (async->uid) free(async->uid);
+    free (async);
 }
+
 void GlueRqtFree(void *userdata)
 {
-    AfbHandleT *glue= (AfbHandleT*)userdata;
+    GlueHandleT *glue= (GlueHandleT*)userdata;
     assert (glue && glue->magic == GLUE_RQT_MAGIC);
 
     free(glue);
@@ -51,32 +54,33 @@ void GlueRqtFree(void *userdata)
 }
 
 // add a reference on Glue handle
-void GlueRqtAddref(AfbHandleT *glue) {
+void GlueRqtAddref(GlueHandleT *glue) {
     if (glue->magic == GLUE_RQT_MAGIC) {
         afb_req_unref (glue->rqt.afb);
     }
 }
 
 // add a reference on Glue handle
-void GlueRqtUnref(AfbHandleT *glue) {
+void GlueRqtUnref(GlueHandleT *glue) {
     if (glue->magic == GLUE_RQT_MAGIC) {
         afb_req_unref (glue->rqt.afb);
     }
 }
 
 // allocate and push a node request handle
-AfbHandleT *GlueRqtNew(afb_req_t afbRqt)
+GlueHandleT *GlueRqtNew(afb_req_t afbRqt)
 {
     assert(afbRqt);
 
     // retreive interpreteur from API
-    AfbHandleT *api = afb_api_get_userdata(afb_req_get_api(afbRqt));
+    GlueHandleT *api = afb_api_get_userdata(afb_req_get_api(afbRqt));
     assert(api->magic == GLUE_API_MAGIC);
 
-    AfbHandleT *glue = (AfbHandleT *)calloc(1, sizeof(AfbHandleT));
+    GlueHandleT *glue = (GlueHandleT *)calloc(1, sizeof(GlueHandleT));
     glue->magic = GLUE_RQT_MAGIC;
     glue->rqt.afb = afbRqt;
     glue->env= api->env;
+    glue->onError= api->onError;
 
     // add node rqt handle to afb request livecycle
     afb_req_v4_set_userdata (afbRqt, (void*)glue, GlueRqtFree);
@@ -85,7 +89,7 @@ AfbHandleT *GlueRqtNew(afb_req_t afbRqt)
 }
 
 // retreive API from node handle
-afb_api_t GlueGetApi(AfbHandleT*glue) {
+afb_api_t GlueGetApi(GlueHandleT*glue) {
    afb_api_t afbApi;
     switch (glue->magic) {
         case GLUE_API_MAGIC:
@@ -97,11 +101,14 @@ afb_api_t GlueGetApi(AfbHandleT*glue) {
         case GLUE_BINDER_MAGIC:
             afbApi= AfbBinderGetApi(glue->binder.afb);
             break;
-        case GLUE_LOCK_MAGIC:
-            afbApi= glue->lock.apiv4;
-            break;
         case GLUE_EVT_MAGIC:
-            afbApi= glue->evt.apiv4;
+            afbApi= glue->event.apiv4;
+            break;
+        case GLUE_JOB_MAGIC:
+            afbApi= glue->job.apiv4;
+            break;
+        case GLUE_TIMER_MAGIC:
+            afbApi= glue->timer.apiv4;
             break;
         default:
             afbApi=NULL;
@@ -109,16 +116,17 @@ afb_api_t GlueGetApi(AfbHandleT*glue) {
     return afbApi;
 }
 
-void GlueVerbose(AfbHandleT *handle, int level, const char *file, int line, const char *func, const char *fmt, ...)
+void GlueVerbose(GlueHandleT *handle, int level, const char *file, int line, const char *func, const char *fmt, ...)
 {
     va_list args;
 
     va_start(args, fmt);
     switch (handle->magic)
     {
+    case GLUE_JOB_MAGIC:
     case GLUE_API_MAGIC:
     case GLUE_EVT_MAGIC:
-    case GLUE_LOCK_MAGIC:
+    case GLUE_POST_MAGIC:
         afb_api_vverbose(GlueGetApi(handle), level, file, line, func, fmt, args);
         break;
 
@@ -177,7 +185,7 @@ void napiPrintMsg (enum afb_syslog_levels level, napi_env env, napi_callback_inf
     if (statusN != napi_ok || argc < GLUE_TWO_ARG) goto OnErrorExit;
 
     // retreive afb glue handle from 1st argument
-    AfbHandleT *handle;
+    GlueHandleT *handle;
     statusN= napi_get_value_external (env, args[0], (void**)&handle);
     if (statusN != napi_ok) goto OnErrorExit;
 
@@ -202,6 +210,7 @@ void napiPrintMsg (enum afb_syslog_levels level, napi_env env, napi_callback_inf
 
             switch (argsType) {
 
+                case napi_undefined:
                 case napi_null: {
     	            param[count++]=NULL;
                     break;
@@ -230,14 +239,17 @@ void napiPrintMsg (enum afb_syslog_levels level, napi_env env, napi_callback_inf
                     param[count++]=(void*)argString;
                     break;
                 }
-                default: 
+                case napi_function:
+                    // ignore function
+                    break;
+                case napi_object:
                     paramJ[index]= napiValuetoJsonc(env, args[idx]);
-                    if (!paramJ[index]) param[count++]=NULL;
-                    else {
-                        param[count++]= (void*)json_object_get_string(paramJ[index]);
-                        index ++;
-                    }
-            }   
+                    param[count++]= (void*)json_object_get_string(paramJ[index]);
+                    index ++;
+                    break;
+                default:
+                    paramJ[count++]= json_object_new_string("unsupported-object");
+            }
 
             // reach max number of arguments
             if (count == sizeof(param)/sizeof(void*)) break;
@@ -263,8 +275,52 @@ napi_valuetype napiGetType (napi_env env, napi_value valueN) {
     if (statusN != napi_ok) goto OnErrorExit;
     return typeN;
 
-OnErrorExit:    
+OnErrorExit:
     return -1;
+}
+
+napi_value napiGetElement (napi_env env, napi_value objectN, const char *key) {
+    napi_value slotN;
+    napi_status statusN;
+    bool isPresent;
+
+    statusN= napi_has_named_property (env, objectN, key, &isPresent);
+    if (statusN != napi_ok || !isPresent) goto OnErrorExit;
+    napi_get_named_property(env, objectN, key, &slotN);
+
+    return slotN;
+
+OnErrorExit:
+    return NULL;
+}
+
+char* napiValueToString(napi_env env, napi_value valueN) {
+    size_t len;
+    char *string;
+    napi_status statusN;
+
+    statusN = napi_get_value_string_utf8(env, valueN, 0, 0, &len);
+    if (statusN != napi_ok) goto OnErrorExit;
+    string= malloc(len+1);
+    statusN = napi_get_value_string_utf8(env, valueN, string, len+1, &len);
+    if (statusN != napi_ok) goto OnErrorExit;
+
+    return string;
+
+OnErrorExit:
+    return NULL;
+}
+
+char* napiGetString (napi_env env, napi_value objectN, const char *key) {
+
+    napi_value valueN= napiGetElement (env, objectN, key);
+    if (!valueN) goto OnErrorExit;
+
+    char *string= napiValueToString(env, valueN);
+    return string;
+
+OnErrorExit:
+    return NULL;
 }
 
 json_object *napiValuetoJsonc(napi_env env, napi_value valueN)
@@ -280,13 +336,13 @@ json_object *napiValuetoJsonc(napi_env env, napi_value valueN)
 
     switch (typeN) {
 
+    case napi_undefined:
     case napi_null: {
     	resultJ = NULL;
         break;
     }
     case napi_boolean: {
       	bool isFlag;
-
         statusN = napi_get_value_bool(env, valueN, &isFlag);
         if (statusN != napi_ok) goto OnErrorExit;
         resultJ = json_object_new_boolean(isFlag);
@@ -302,7 +358,7 @@ json_object *napiValuetoJsonc(napi_env env, napi_value valueN)
         if (statusN != napi_ok) goto OnErrorExit;
         nombre = (int64_t)number; // evil trick to determine wether n fits in an integer. (stolen from ltcl.c)
         if (number == nombre) resultJ = json_object_new_int64(nombre);
-        else  resultJ = json_object_new_double(number);   
+        else  resultJ = json_object_new_double(number);
         break;
     }
     case napi_string: {
@@ -316,7 +372,7 @@ json_object *napiValuetoJsonc(napi_env env, napi_value valueN)
         if (!resultJ)  goto OnErrorExit;
         break;
     }
-  
+
     case napi_object: {
         bool isArray;
         statusN = napi_is_array(env, valueN, &isArray);
@@ -326,18 +382,15 @@ json_object *napiValuetoJsonc(napi_env env, napi_value valueN)
             resultJ = json_object_new_array();
             if (!resultJ)  goto OnErrorExit;
 
+
             statusN = napi_get_array_length(env, valueN, &count);
             if (statusN != napi_ok)  goto OnErrorExit;
-
             for (int idx = 0 ; idx < count ; idx++) {
                 napi_value slotN;
                 json_object *slotJ;
                 statusN = napi_get_element(env, valueN, idx, &slotN);
                 if (statusN != napi_ok)  goto OnErrorExit;
                 slotJ = napiValuetoJsonc(env, slotN);
-                if (!slotJ)  {
-                    goto OnErrorExit;
-                }
                 err = json_object_array_add(resultJ, slotJ);
                 if (err < 0) {
                     json_object_put(slotJ);
@@ -372,7 +425,6 @@ json_object *napiValuetoJsonc(napi_env env, napi_value valueN)
                 }
 
                 json_object *slotJ = napiValuetoJsonc(env, slotN);
-                if (!slotJ)goto OnErrorExit;
                 json_object_object_add(resultJ, label, slotJ);
             }
         }
@@ -387,14 +439,14 @@ json_object *napiValuetoJsonc(napi_env env, napi_value valueN)
         if (statusN != napi_ok) goto OnErrorExit;
 
         // attach napi object reference to jsonc object
-        napiJsoncUserDataT *userdata= calloc(1,sizeof(napiJsoncUserDataT));
-        userdata->ref= callbackR;
-        userdata->env= env;
-        json_object_set_userdata(resultJ, userdata, napiFreeJsonCtx);
+        GlueAsyncCtxT *async= calloc(1,sizeof(GlueAsyncCtxT));
+        async->callbackR= callbackR;
+        async->env= env;
+        async->uid= napiGetString(env, valueN, "name");
+        json_object_set_userdata(resultJ, async, freeJsonCtx);
         break;
     }
     case napi_symbol:
-    case napi_undefined:
     case napi_external:
     default:
         goto OnErrorExit;
@@ -422,7 +474,7 @@ json_object *napiRefToJsonc(napi_env env, napi_ref valueR) {
 
     return valueJ;
 OnErrorExit:
-    return NULL;    
+    return NULL;
 }
 
 napi_value napiJsoncToValue(napi_env env, json_object *valueJ)
@@ -446,7 +498,7 @@ napi_value napiJsoncToValue(napi_env env, json_object *valueJ)
 	}
 	case json_type_int: {
 		int jval = json_object_get_int(valueJ);
-		statusN = napi_create_int32(env, jval, &resultN);
+		statusN = napi_create_int64(env, jval, &resultN);
 		if (statusN != napi_ok) goto OnErrorExit;
 		break;
 	}
@@ -455,7 +507,7 @@ napi_value napiJsoncToValue(napi_env env, json_object *valueJ)
 		if (statusN != napi_ok) goto OnErrorExit;
 		json_object_object_foreach(valueJ, key, slotJ) {
 			napi_value keyN;
-			statusN = napi_create_string_utf8(env, key, strlen(key), &keyN);
+			statusN = napi_create_string_utf8(env, key, NAPI_AUTO_LENGTH, &keyN);
 			if (statusN != napi_ok) goto OnErrorExit;
 
             napi_value slotN= napiJsoncToValue (env, slotJ);
@@ -512,12 +564,12 @@ napi_ref napiJsoncToRef(napi_env env, json_object *valueJ) {
     return valueR;
 
 OnErrorExit:
-    return NULL;    
+    return NULL;
 }
 
 
 // reply afb request only once and unref py handle
-int GlueReply(AfbHandleT *glue, int64_t status, int64_t nbreply, afb_data_t *reply)
+int GlueAfbReply(GlueHandleT *glue, int64_t status, int64_t nbreply, afb_data_t *reply)
 {
     if (glue->rqt.replied) goto OnErrorExit;
     afb_req_reply(glue->rqt.afb, (int)status, (int)nbreply, reply);
@@ -529,80 +581,85 @@ OnErrorExit:
     return -1;
 }
 
-
-/*
-
 // retreive subcall response and build node response
-const char *nodePushAfbReply (napi_value resultP, int start, unsigned nreplies, const afb_data_t *replies) {
+const char *napiPushAfbArgs (napi_env env, napi_value *resultN, int start, unsigned nreplies, afb_data_t const replies[]) {
     const char *errorMsg=NULL;
+    napi_value valueN;
+    napi_status statusN;
 
     for (int idx = 0; idx < nreplies; idx++)
     {
-        if (replies[idx]) {
-            switch (afb_typeid(afb_data_type(replies[idx])))  {
-
-                case Afb_Typeid_Predefined_Stringz: {
-                    const char *valueN= (char*)afb_data_ro_pointer(replies[idx]);
-                    if (valueN && valueN[0]) {
-                        nodeTuple_SetItem(resultP, idx+start, nodeUnicode_FromString(valueN));
-                    } else {
-                        nodeTuple_SetItem(resultP, idx+start, node_None);
-                    }
-                    break;
-                }
-                case Afb_Typeid_Predefined_Bool: {
-                    const long *valueN= (long*)afb_data_ro_pointer(replies[idx]);
-                    nodeTuple_SetItem(resultP, idx+start, nodeBool_FromLong(*valueN));
-                    break;
-                }
-                case Afb_Typeid_Predefined_I8:
-                case Afb_Typeid_Predefined_U8:
-                case Afb_Typeid_Predefined_I16:
-                case Afb_Typeid_Predefined_U16:
-                case Afb_Typeid_Predefined_I64:
-                case Afb_Typeid_Predefined_U64:
-                case Afb_Typeid_Predefined_I32:
-                case Afb_Typeid_Predefined_U32: {
-                    const long *valueN= (long*)afb_data_ro_pointer(replies[idx]);
-                    nodeTuple_SetItem(resultP, idx+start, nodeBool_FromLong(*valueN));
-                    break;
-                }
-                case Afb_Typeid_Predefined_Double:
-                case Afb_Typeid_Predefined_Float: {
-                    const double *valueN= (double*)afb_data_ro_pointer(replies[idx]);
-                    nodeTuple_SetItem(resultP, idx+start, nodeFloat_FromDouble(*valueN));
-                    break;
-                }
-
-                case  Afb_Typeid_Predefined_Json: {
-                    afb_data_t data;
-                    json_object *valueJ;
-                    int err;
-
-                    err = afb_data_convert(replies[idx], &afb_type_predefined_json_c, &data);
-                    if (err) {
-                        errorMsg= "unsupported json string";
-                        goto OnErrorExit;
-                    }
-                    valueJ= (json_object*)afb_data_ro_pointer(data);
-                    nodeTuple_SetItem(resultP, idx+start, jsonTonodeObj(valueJ));
-                    afb_data_unref(data);
-                    break;
-                }
-                case  Afb_Typeid_Predefined_Json_C: {
-                    json_object *valueJ= (json_object*)afb_data_ro_pointer(replies[idx]);
-                    if (valueJ) {
-                        nodeTuple_SetItem(resultP, idx+start, jsonTonodeObj(valueJ));
-                    } else {
-                        nodeTuple_SetItem(resultP, idx+start, node_None);
-                    }
-                    break;
-                }
-                default:
-                    errorMsg= "unsupported return data typeN";
-                    goto OnErrorExit;
-            }
+        if (!replies[idx]) {
+            statusN= napi_get_null(env, &valueN);
+            if (statusN != napi_ok) goto OnErrorExit;
         }
+        else switch (afb_typeid(afb_data_type(replies[idx])))  {
+
+            case Afb_Typeid_Predefined_Stringz: {
+                const char *value= (char*)afb_data_ro_pointer(replies[idx]);
+                if (value && value[0]) {
+                    statusN = napi_create_string_utf8(env, value, NAPI_AUTO_LENGTH, &valueN);
+                    if (statusN != napi_ok) goto OnErrorExit;
+                } else {
+                    statusN= napi_get_null(env, &valueN);
+                    if (statusN != napi_ok) goto OnErrorExit;
+                }
+                break;
+            }
+            case Afb_Typeid_Predefined_Bool: {
+                const long *value= (long*)afb_data_ro_pointer(replies[idx]);
+                statusN = napi_get_boolean(env, value, &valueN);
+                if (statusN != napi_ok) goto OnErrorExit;
+                break;
+            }
+            case Afb_Typeid_Predefined_I8:
+            case Afb_Typeid_Predefined_U8:
+            case Afb_Typeid_Predefined_I16:
+            case Afb_Typeid_Predefined_U16:
+            case Afb_Typeid_Predefined_I64:
+            case Afb_Typeid_Predefined_U64:
+            case Afb_Typeid_Predefined_I32:
+            case Afb_Typeid_Predefined_U32: {
+                const int64_t *value= (int64_t*)afb_data_ro_pointer(replies[idx]);
+                statusN = napi_create_int64(env, *value, &valueN);
+                if (statusN != napi_ok) goto OnErrorExit;
+                break;
+            }
+            case Afb_Typeid_Predefined_Double:
+            case Afb_Typeid_Predefined_Float: {
+                const double *value= (double*)afb_data_ro_pointer(replies[idx]);
+                statusN = napi_create_double(env, *value, &valueN);
+                if (statusN != napi_ok) goto OnErrorExit;
+                break;
+            }
+
+            case  Afb_Typeid_Predefined_Json: {
+                afb_data_t data;
+                json_object *valueJ;
+                int err;
+
+                err = afb_data_convert(replies[idx], &afb_type_predefined_json_c, &data);
+                if (err) {
+                    errorMsg= "unsupported json string";
+                    goto OnErrorExit;
+                }
+                valueJ= (json_object*)afb_data_ro_pointer(data);
+                valueN= napiJsoncToValue(env,valueJ);
+                if (!valueN) goto OnErrorExit;
+                afb_data_unref(data);
+                break;
+            }
+            case  Afb_Typeid_Predefined_Json_C: {
+                json_object *valueJ= (json_object*)afb_data_ro_pointer(replies[idx]);
+                valueN= napiJsoncToValue(env,valueJ);
+                if (!valueN) goto OnErrorExit;
+                break;
+            }
+            default:
+                errorMsg= "afb-object-unsupported";
+                goto OnErrorExit;
+        }
+        resultN[idx+start]=valueN;
     }
     return NULL;
 
@@ -610,64 +667,17 @@ OnErrorExit:
     return errorMsg;
 }
 
-
-void napiInfoDbg (AfbHandleT *handle, enum afb_syslog_levels level, const char*funcname, const char * format, ...) {
-    char const *cbInfo, *filename;
-    int linenum;
-    va_list args;
-
-    //nodeErr_Print();
-    napi_value typeP, *valueP, *tracebackP;
-    nodeErr_Fetch(&typeP, &valueP, &tracebackP);
-    if (valueP) cbInfo= nodeUnicode_AsUTF8(valueP);
-    if (tracebackP) {
-        nodeTracebackObject* traceback = (nodeTracebackObject*)tracebackP;
-        linenum= traceback->tb_lineno;
-        filename= nodeUnicode_AsUTF8(traceback->tb_frame->f_code->co_filename);
-        if (filename) funcname=filename;
-    }
-
-    GlueVerbose(handle, level, cbInfo, linenum, funcname, format, args);
-}
-
-
-void nodeFreeJsonCtx (json_object *configJ, void *userdata) {
-    napi_value nodeObj= (nodeObject*) userdata;
-    node_DecRef (nodeObj);
-}
-
-
 // add a reference on Glue handle
-void nodeRqtAddref(AfbHandleT *glue) {
+void nodeRqtAddref(GlueHandleT *glue) {
     if (glue->magic == GLUE_RQT_MAGIC) {
-        afb_req_unref (glue->rqt.afb);
+        afb_req_addref (glue->rqt.afb);
     }
 }
 
 // add a reference on Glue handle
-void nodeRqtUnref(AfbHandleT *glue) {
+void nodeRqtUnref(GlueHandleT *glue) {
     if (glue->magic == GLUE_RQT_MAGIC) {
         afb_req_unref (glue->rqt.afb);
     }
 
 }
-
-typedef struct {
-    pthread_once_t *once;
-    void *ctx;
-} nodeThreadUserData;
-
-
-// reply afb request only once and unref node handle
-int GlueReply(AfbHandleT *glue, long statusN, long nbreply, afb_data_t *reply)
-{
-    if (glue->rqt.replied) goto OnErrorExit;
-    afb_req_reply(glue->rqt.afb, (int)statusN, (int)nbreply, reply);
-    glue->rqt.replied = 1;
-    return 0;
-
-OnErrorExit:
-    GLUE_AFB_ERROR(glue, "unique response require");
-    return -1;
-}
-*/

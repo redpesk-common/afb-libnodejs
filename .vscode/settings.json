@@ -9,7 +9,15 @@
         "afb-apiset.h": "c",
         "afb-sys.h": "c",
         "verbose.h": "c",
-        "typeinfo": "c"
+        "typeinfo": "c",
+        "bitset": "c",
+        "chrono": "c",
+        "algorithm": "c",
+        "__bit_reference": "c",
+        "unordered_map": "c"
     },
-    "nodejs.nodejsPath": "/usr/bin/nodejs3.9"
+    "nodejs.nodejsPath": "/usr/bin/node",
+    "lldb.displayFormat": "auto",
+    "lldb.showDisassembly": "never",
+    "lldb.dereferencePointers": true,
 }

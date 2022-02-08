@@ -1,20 +1,15 @@
-#!/usr/bin/nodejs3
+#!/usr/bin/node
 
-"""
-Conoderight 2021 Fulup Ar Foll fulup@iot.bzh
+/*
+Copyright 2021 Fulup Ar Foll fulup@iot.bzh
 Licence: $RP_BEGIN_LICENSE$ SPDX:MIT https://opensource.org/licenses/MIT $RP_END_LICENSE$
 
 object:
-    loa-api.lua loanstrate how to use LOA and permission. While LOA can be tested outside of any context,
-    permission check requiere a valid Cynagora installation
-
     - loa/set current LOA level to 1
     - loa/reset current LOA level to 0
     - loa/check is protected by ACLS and requiere a LOA >=1 it display client session uuid
 
-    Api can be requested from REST|websocket from a browser on http:localhost:1234
-
-usage
+usage:
     - from dev tree: LD_LIBRARY_PATH=../afb-libglue/build/src/ nodejs samples/simple-api.nodejs
     - point your browser at http://localhost:1234/devtools
 
@@ -22,92 +17,118 @@ config: following should match your installation paths
     - devtools alias should point to right path alias= {'/devtools:/usr/share/afb-ui-devtools/binder'},
     - nodejsPATH='/my-node-module-path' (to _afbnodeglue.so)
     - LD_LIBRARY_PATH='/my-glulib-path' (to libafb-glue.so
-"""
+*/
+'use strict';
 
-# import libafb nodejs glue
-from afbnodeglue import libafb
+// find and import libafb module
+process.env.NODE_PATH='./build/src';
+require("module").Module._initPaths();
+var libafb=require('afbnodeglue');
 
-# static variables
-count= 0
+// static variables
+global.count=0
 
- # ping/pong event func
-def pingCB(rqt, *args):
-    global count
-    count += 1
-    libafb.notice  (rqt, "pingCB count=%d", count)
-    return (0, {"pong":count}) # implicit response
+// ping/pong test func
+function pingTestCB(rqt, ...args) {
+    global.count += 1;
+    libafb.notice  (rqt, "From pingTestCB count=%d", count);
+    return [0, {"pong":count}]; // implicit response
+}
 
-def setLoaCB(rqt, *args):
+function setLoaCB(rqt, ...args) {
     libafb.notice  (rqt, "setLoaCB LOA=1")
     libafb.setloa (rqt, 1)
     return 0
+}
 
-
-def resetLoaCB(rqt, *args):
+function resetLoaCB(rqt, ...args) {
     libafb.notice (rqt, "resetLoaCB LOA=0")
     libafb.setloa (rqt, 0)
     return 0
+}
 
-
-def checkLoaCB(rqt, *args):
+function checkLoaCB(rqt, ...args) {
     libafb.notice (rqt, "Protected API session uuid=%s", libafb.clientinfo(rqt, 'uuid'))
     return 0
+}
 
-
-# executed when binder and all api/interfaces are ready to serv
-def mainLoopCB(binder):
-    libafb.notice(binder, "mainLoopCB=[%s]", libafb.config(binder, "uid"))
-    return 0 # keep running for ever
-
-# api verb list
-loaVerbs = [
-    {'uid':'lua-ping' , 'verb':'ping'  , 'callback':pingCB    ,'auth':'anonymous', 'info':'lua ping loa def'},
+// api verb list
+var loaVerbs = [
+    {'uid':'lua-ping' , 'verb':'ping'  , 'callback':pingTestCB,'auth':'anonymous', 'info':'lua ping loa function'},
     {'uid':'lua-set'  , 'verb':'set'   , 'callback':setLoaCB  ,'auth':'anonymous', 'info':'set LOA to 1'},
     {'uid':'lua-reset', 'verb':'reset' , 'callback':resetLoaCB,'auth':'anonymous', 'info':'reset LOA to 0'},
-    {'uid':'lua-check', 'verb':'check' , 'callback':checkLoaCB,'auth':'autorized', 'info':'protected API requiere LOA>=1'},
+    {'uid':'lua-check', 'verb':'check' , 'callback':checkLoaCB,'auth':'authorized', 'info':'protected API requirer LOA>=1'},
 ]
 
-# define permissions
-loaAlcs = [
+// define permissions
+var loaAlcs = [
     ['anonymous'      , 'loa', 0],
-    ['autorized'      , 'loa', 1],
+    ['authorized'     , 'loa', 1],
     ['perm-1'         , 'key', 'permission-1'],
     ['perm-2'         , 'key', 'permission-2'],
     ['login-and-roles', 'and', ['perm-2', 'perm-1']],
-    ['login-or-roles' , 'or' , ['autorized', 'perm-1']],
+    ['login-or-roles' , 'or' , ['authorized', 'perm-1']],
 ]
 
-# define and instanciate API
-loaApi = {
-    'uid'     : 'lua-loa',
+// called when an api/verb|event callback fail within node
+function errorTestCB(rqt, uid, error, ...args) {
+    libafb.error (rqt, "FATAL: uid=%s info=%s args=%s", uid, error.message, args);
+
+    if (libafb.config(rqt, 'verbose')) {
+        console.log('\nuid:' + uid + ' Stacktrace:')
+        console.log('==============================')
+        console.log(error.stack);
+    }
+
+    if (libafb.replyable(rqt)) {
+        var stack = error.stack.split("\n");
+        libafb.reply (rqt, -1, {'uid':uid, 'info': error.message, 'trace': stack[1].substring(7)});
+    }
+}
+
+// api verb list
+var loaVerbs = [
+    {'uid':'py-ping' , 'verb':'ping'  , 'callback':pingTestCB ,'auth':'anonymous', 'info':'py ping loa function'},
+    {'uid':'py-set'  , 'verb':'set'   , 'callback':setLoaCB   ,'auth':'anonymous', 'info':'set LOA to 1'},
+    {'uid':'py-reset', 'verb':'reset' , 'callback':resetLoaCB ,'auth':'anonymous', 'info':'reset LOA to 0'},
+    {'uid':'py-check', 'verb':'check' , 'callback':checkLoaCB ,'auth':'authorized', 'info':'protected API requirer LOA>=1'},
+]
+
+// define permissions
+var loaAlcs = [
+    ['anonymous'      , 'loa', 0],
+    ['authorized'      , 'loa', 1],
+    ['perm-1'         , 'key', 'permission-1'],
+    ['perm-2'         , 'key', 'permission-2'],
+    ['login-and-roles', 'and', ['perm-2', 'perm-1']],
+    ['login-or-roles' , 'or' , ['authorized', 'perm-1']],
+]
+
+// functionine and instantiate API
+var loaApi = {
+    'uid'     : 'node-loa',
     'api'     : 'loa',
-    'provide' : 'test',
-    'info'    : 'lua api loa',
+    'class'   : 'test',
+    'info'    : 'node loa acl/privilege check',
     'verbose' : 9,
     'export'  : 'public',
     'verbs'   : loaVerbs,
+    'onerror' : errorTestCB,
     'alias'   : ['/devtools:/usr/share/afb-ui-devtools/binder'],
 }
 
-# define and instanciate libafb-binder
-loaOpts = {
-    'uid'     : 'lua-binder',
+// functionine and instantiate libafb-binder
+var loaOpts = {
+    'uid'     : 'node-binder',
     'port'    : 1234,
     'verbose' : 9,
     'roothttp': './conf.d/project/htdocs',
-    'rootdir' : '.',
+    'ldpath' : [process.env.HOME + '/opt/helloworld-binding/lib','/usr/local/helloworld-binding/lib'],
+    'alias'  : ['/devtools:/usr/share/afb-ui-devtools/binder'],
     'acls'    : loaAlcs,
 }
 
+var binder= libafb.binder(loaOpts);
+libafb.apiadd(loaApi);
 
-# create and start binder
-binder= libafb.binder(loaOpts)
-glue= libafb.apiadd(loaApi)
-
-# should never return
-status= libafb.mainloop(mainLoopCB)
-if status < 0:
-    libafb.error (binder, "OnError MainLoop Exit")
-else:
-    libafb.notice(binder, "OnSuccess Mainloop Exit")
-
+console.log ("### nodejs running ###")

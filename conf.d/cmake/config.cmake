@@ -1,5 +1,5 @@
 ###########################################################################
-# Conoderight 2015, 2016, 2017, 2018, 2019 IoT.bzh
+# Copyright 2015, 2016, 2017, 2018, 2019 IoT.bzh
 #
 # author: Fulup Ar Foll <fulup@iot.bzh>
 #
@@ -30,6 +30,9 @@ set(PROJECT_AUTHOR "Fulup Ar Foll")
 set(PROJECT_AUTHOR_MAIL "fulup@iot.bzh")
 set(PROJECT_LICENSE "redpesk")
 set(PROJECT_LANGUAGES,"C")
+
+# generate vscode intellisense for clangd/llvm-vs-code-extensions
+set(CMAKE_EXPORT_COMPILE_COMMANDS on)
 
 # Where are stored default templates files from submodule or subtree app-templates in your project tree
 # relative to the root project directory

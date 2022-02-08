@@ -41,7 +41,7 @@ Install your extention
 * codium --install-extension cpptools-linux.vsix
 * codium --install-extension ms-nodejs-release.vsix
 
-WARNING: the lastest version is probably not compatible with your codium version.   
+WARNING: the lastest version is probably not compatible with your codium version.
 
 ## Import afb-nodejsglue
 
@@ -218,8 +218,24 @@ afb-libafb timer API is exposed in nodejs
 
 ## Binder MainLoop
 
+afb-libnode relies on nodejs/libuv mainloop. Nevertheless as node require a dedicated handle context for libuv callback
+developer should explicitly request libuv mainloop at the end of initialization code.
+
+```js
+  // infinite libuv mainloop
+  libafb.loopenter()
+```
+
+`Note: When not properly initialized nodejs generate following error:`
+```node
+#
+# Fatal error in v8::HandleScope::CreateHandle()
+# Cannot create a handle without a HandleScope
+#
+```
+
 Under normal circumstance binder mainloop never returns. Nevertheless during test phase it is very common to wait and asynchronous event(s) before deciding if the test is successfully or not.
-Mainloop starts with libafb.mainloop('xxx'), where 'xxx' is an optional startup function that control mainloop execution. They are two ways to control the mainloop:
+Mainloop starts with libafb.jobstart('xxx'), where 'xxx' is an optional startup function that control mainloop execution. They are two ways to control the mainloop:
 
 * when startup function returns ```status!=0``` the binder immediately exit with corresponding status. This case is very typical when running pure synchronous api test.
 * set a shedwait lock and control the main loop from asynchronous events. This later case is mandatory when we have to start the mainloop to listen event, but still need to exit it to run a new set of test.
@@ -265,7 +281,7 @@ Note:
         return(status) # negative status force mainloop exit
 
     # start mainloop
-    status=libafb.mainloop(startTestCB)
+    status=libafb.jobstart(startTestCB)
 ```
 
 ## Miscellaneous APIs/utilities
@@ -274,3 +290,7 @@ Note:
 * libafb.nodejsstrict(true): prevents nodejs from creating global variables.
 * libafb.config(handle, "key"): returns binder/rqt/timer/... config
 * libafb.notice|warning|error|debug print corresponding hookable syslog trace
+
+## ToDeDone
+
+The multithreading model should be improveds, as today everything run within one thread except for AFB data Marshalling /Unmarshalling. At minimum importing C binding should run within a different set of Thread.
