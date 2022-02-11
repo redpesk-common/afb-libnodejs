@@ -27,7 +27,7 @@ config: following should match your installation paths
 // find and import libafb module
 process.env.NODE_PATH='./build/src';
 require("module").Module._initPaths();
-var libafb=require('afbnodeglue');
+const libafb=require('afbnodeglue');
 
 // static variables
 global.count=0

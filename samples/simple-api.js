@@ -22,8 +22,7 @@ config: following should match your installation paths
 // find and import libafb module
 process.env.NODE_PATH='./build/src';
 require("module").Module._initPaths();
-var libafb=require('afbnodeglue');
-const { config } = require("process");
+const libafb=require('afbnodeglue');
 
 // static variables
 global.count=0
@@ -66,7 +65,7 @@ function errorTestCB(rqt, uid, error, ...args) {
 var demoVerbs = [
     {'uid':'node-ping', 'verb':'ping', 'callback':pingTestCB, 'info':'ping demo function'},
     {'uid':'node-args', 'verb':'args', 'callback':argsTestCB, 'info':'check input query', 'sample':[{'arg1':'arg-one', 'arg2':'arg-two'}, {'argA':1, 'argB':2}]},
-    {'uid':'node-fail', 'verb':'fail', 'callback':failTestCB, 'info':'call a failling callback', 'sample':[{'arg1':'arg-one', 'arg2':'arg-two'}, {'argA':1, 'argB':2}]},
+    {'uid':'node-fail', 'verb':'fail', 'callback':failTestCB, 'info':'call a failing callback', 'sample':[{'arg1':'arg-one', 'arg2':'arg-two'}, {'argA':1, 'argB':2}]},
 ]
 
 // define and instantiate API

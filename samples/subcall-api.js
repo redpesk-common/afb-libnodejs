@@ -27,10 +27,7 @@ config: following should match your installation paths
 // find and import libafb module
 process.env.NODE_PATH='./build/src';
 require("module").Module._initPaths();
-var libafb=require('afbnodeglue');
-
-//import libafb nodejs glue
-var libafb=require('afbnodeglue');
+const libafb=require('afbnodeglue');
 
 // static variables
 global.count=0
@@ -60,6 +57,21 @@ function asyncCB(rqt, ...args) {
     libafb.notice  (rqt, "asyncCB calling helloworld/testargs ...args=%s", args)
     libafb.callasync (rqt,"helloworld", "testargs", asyncRespCB, userdata, args[0])
     // response within 'asyncRespCB' callback
+}
+
+function promiseCB(rqt, ...args) {
+    libafb.notice  (rqt, "asyncCB calling helloworld/testargs ...args=%s", args)
+
+    libafb.subcall (rqt,"helloworld", "testargs", args[0])
+        .then (response => {
+            libafb.notice(rqt, "PromiseCB Success: status=%d response=%s" , response.status, response.args)
+            libafb.reply (rqt, response.status, "PromiseCB Success")
+            })
+        .catch(response => {
+            libafb.error (rqt, "PromiseCB Fail: status=%d response=%s" , response.status, response.args)
+            libafb.reply (rqt, response.status, "PromiseCB Fail")
+            })
+        .finally(()=> {libafb.info  (rqt, "PromiseCB Done")})
 }
 
 function syncCB(rqt, ...args) {
@@ -97,23 +109,12 @@ function errorTestCB(rqt, uid, error, ...args) {
     }
 }
 
-// executed when binder and all api/interfaces are ready to serv
-function jobstartCB(job) {
-    var status;
-    libafb.notice(job, "jobstartCB=[%s]", libafb.getuid(job))
-
-    var response= libafb.callsync(job, "helloworld", "ping")
-    if (response.status === 0) status=1 
-    else status=-1
-    libafb.notice (job, "helloworld/ping status=%d", status)
-    return status // returning 0 would wait for an explicit libafb.jobkill(status)
-}
-
 // verbs callback list
 var demoVerbs = [
-    {'uid':'node-ping'    , 'verb':'ping' , 'callback':pingTestCB , 'info':'node ping demo function'},
-    {'uid':'node-synccall', 'verb':'sync' , 'callback':syncCB , 'info':'synchronous subcall of private api' , 'sample':[{'cezam':'open'}, {'cezam':'close'}]},
-    {'uid':'node-asyncall', 'verb':'async', 'callback':asyncCB, 'info':'asynchronous subcall of private api', 'sample':[{'cezam':'open'}, {'cezam':'close'}]},
+    {'uid':'node-ping'    , 'verb':'ping'   , 'callback':pingTestCB , 'info':'node ping demo function'},
+    {'uid':'node-synccall', 'verb':'sync'   , 'callback':syncCB     , 'info':'synchronous subcall of private api' , 'sample':[{'cezam':'open'}, {'cezam':'close'}]},
+    {'uid':'node-asyncall', 'verb':'async'  , 'callback':asyncCB    , 'info':'asynchronous subcall of private api', 'sample':[{'cezam':'open'}, {'cezam':'close'}]},
+    {'uid':'node-promise' , 'verb':'promise', 'callback':promiseCB  , 'info':'asynchronous subcall of private api', 'sample':[{'cezam':'open'}, {'cezam':'close'}]},
 ]
 
 // events callback list

@@ -41,13 +41,19 @@
     napi_get_null(env, &resultN); \
     return resultN; }
 
-// compiled AFB verb context data
 typedef struct {
-    int magic;
-    const char *verb;
-    const char *info;
-    napi_ref funcP;
-} napiVerbDataT;
+    char *uid;
+    sem_t sem;
+    int64_t status;
+    int64_t timeout;
+    unsigned nargs;
+    unsigned nparams;
+    napi_value *argsN;
+    napi_deferred deferredN;
+    napi_async_work workerN;
+    napi_threadsafe_function threadN;
+    void *userdata;
+} GlueCtxThreadT;
 
 struct napiBinderHandleS {
     AfbBinderHandleT *afb;
@@ -98,19 +104,17 @@ struct napiPostHandleS {
 };
 
 struct napiJobHandleS {
-    int64_t status;
-    napi_deferred deferred;
-    int64_t timeout;
-    sem_t sem;
     afb_api_t apiv4;
+    GlueAsyncCtxT async;
+    GlueCtxThreadT *thread;
 };
 
 typedef struct {
     GlueHandleMagicsE magic;
-    GlueAsyncCtxT* onError;
-    int usage;
     napi_env env;
     char *uid;
+    int usage;
+    GlueAsyncCtxT* onError;
     union {
         struct napiBinderHandleS binder;
         struct napiApiHandleS api;

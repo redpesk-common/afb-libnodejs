@@ -543,42 +543,6 @@ OnErrorExit:
     GLUE_RETURN_NULL;
 }
 
-static napi_value GlueJobStatus(napi_env env, napi_callback_info info)
-{
-    const char  *errorCode="internal-error", *errorMsg= "syntax: jobstatus(loop)";
-    napi_status statusN;
-
-    // get argument count
-    size_t argc;
-    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
-    napi_value args[argc];
-
-    // get arguments
-    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-    if (statusN != napi_ok || argc != GLUE_ONE_ARG) {
-        errorCode="invalid-arguments-count";
-        goto OnErrorExit;
-    }
-
-    // retreive afb loop handle from 1st argument
-    GlueHandleT *handle;
-    statusN= napi_get_value_external (env, args[0], (void**)&handle);
-    if (statusN != napi_ok || handle->magic != GLUE_JOB_MAGIC) {
-        errorCode="invalid-loop-handle";
-        goto OnErrorExit;
-    }
-
-    napi_value resultN;
-    statusN= napi_create_int64(env, handle->job.status, &resultN);
-
-    return resultN;
-
-OnErrorExit:
-    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
-    napi_throw_error(env, errorCode, errorMsg);
-    GLUE_RETURN_NULL;
-}
-
 static napi_value GlueJobKill(napi_env env, napi_callback_info info)
 {
     const char  *errorCode="internal-error", *errorMsg= "syntax: jobkill(job, status)";
@@ -604,14 +568,14 @@ static napi_value GlueJobKill(napi_env env, napi_callback_info info)
         goto OnErrorExit;
     }
 
-    statusN= napi_get_value_int64(env, args[1], &handle->job.status);
+    statusN= napi_get_value_int64(env, args[1], &handle->job.thread->status);
     if (statusN != napi_ok || napiGetType(env, args[1]) != napi_number) {
         errorCode="invalid-status-number";
         goto OnErrorExit;
     }
 
     // release semaphore
-    sem_post(&handle->job.sem);
+    sem_post(&handle->job.thread->sem);
     GLUE_RETURN_NULL;
 
 OnErrorExit:
@@ -905,7 +869,7 @@ static napi_value GlueJobStart(napi_env env, napi_callback_info info)
         goto OnErrorExit;
     }
 
-    if (argc >= GLUE_TWO_ARG) {
+    if (argc >= GLUE_THREE_ARG) {
         if (statusN == napi_ok) napi_get_value_int64(env, args[2], &timeout);
         if (statusN != napi_ok || napiGetType(env,args[2]) != napi_number) {
             errorCode="Invalid-timeout-integer";
@@ -913,7 +877,7 @@ static napi_value GlueJobStart(napi_env env, napi_callback_info info)
         }
     }
 
-    if (argc == GLUE_THREE_ARG && napiGetType(env, args[3]) != napi_null) {
+    if (argc == GLUE_FOUR_ARG && napiGetType(env, args[3]) != napi_null) {
         statusN= napi_create_reference(env, args[3], 1, &userdataR);
         if (statusN != napi_ok) {
             errorCode="Invalid-userdata-object";
@@ -1162,7 +1126,7 @@ OnErrorExit:
 
 static napi_value GlueRespond(napi_env env, napi_callback_info info)
 {
-    const char *errorCode="internal-error", *errorMsg = "syntax: response(rqt, statusN, [arg1 ... argn])";
+    const char *errorCode="internal-error", *errorMsg = "syntax: reply(rqt, statusN, [arg1 ... argn])";
     napi_status statusN;
     json_object *valueJ;
     int64_t status, count=0;
@@ -1416,7 +1380,7 @@ OnErrorExit:
 
 static napi_value GlueCallAsync(napi_env env, napi_callback_info info)
 {
-    const char  *errorCode="internal-error", *errorMsg= "syntax: callasync(handle, api, verb, callback, context, ...)";
+    const char  *errorCode="internal-error", *errorMsg= "syntax: callasync(handle, api, verb, callback, context, ...args)";
     napi_status statusN;
     json_object *valueJ;
     int count=0;
@@ -1499,9 +1463,83 @@ OnErrorExit:
     GLUE_RETURN_NULL;
 }
 
+static napi_value GlueCallPromise(napi_env env, napi_callback_info info)
+{
+    const char  *errorCode="internal-error", *errorMsg= "syntax: call(handle, api, verb, ...args)";
+    napi_status statusN;
+    json_object *valueJ;
+    int count=0;
+
+    // get argument count
+    size_t argc;
+    napi_get_cb_info(env, info, &argc, NULL, NULL, NULL);
+    napi_value args[argc];
+
+    // get arguments
+    statusN = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+    if (statusN != napi_ok || argc <  GLUE_THREE_ARG) {
+        errorCode="invalid-argument-count";
+        goto OnErrorExit;
+    }
+
+    // retreive afb glue handle from 1st argument
+    GlueHandleT *glue;
+    statusN= napi_get_value_external (env, args[0], (void**)&glue);
+    if (statusN != napi_ok) {
+        errorCode="invalid-rqt-handle";
+        goto OnErrorExit;
+    }
+
+    // retreive API and VERB string
+    size_t len;
+    char apiname[API_MAX_LEN];
+    char verbname[VERB_MAX_LEN];
+    statusN = napi_get_value_string_utf8(env, args[1], apiname, API_MAX_LEN, &len);
+    if (statusN != napi_ok || len == API_MAX_LEN) {
+        errorCode="apiname-too-long";
+        goto OnErrorExit;
+    }
+    statusN = napi_get_value_string_utf8(env, args[2], verbname, VERB_MAX_LEN, &len);
+    if (statusN != napi_ok || len == VERB_MAX_LEN) {
+        errorCode="verbname-too-long";
+        goto OnErrorExit;
+    }
+
+    int nparams= (int)argc-GLUE_THREE_ARG;
+    afb_data_t *params=NULL;
+    if (nparams > 0) {
+        params= alloca(sizeof(afb_data_t*)*nparams);
+        for (int idx= 0 ; idx < nparams; idx++) {
+            valueJ = napiValuetoJsonc(env, args[idx+GLUE_THREE_ARG]);
+            if (!valueJ)  goto OnErrorExit;
+            afb_create_data_raw(&params[count], AFB_PREDEFINED_TYPE_JSON_C, valueJ, 0, (void *)json_object_put, valueJ);
+            count++;
+        }
+    }
+
+    GlueCtxThreadT *thread= calloc(1, sizeof(GlueCtxThreadT));
+    asprintf (&thread->uid, "%s/%s", apiname, verbname);
+    napi_value promiseN= GluePromiseStartCb(env, thread);
+    if (!promiseN) goto OnErrorExit;
+
+    switch (glue->magic) {
+        case GLUE_RQT_MAGIC:
+            afb_req_subcall (glue->rqt.afb, apiname, verbname, nparams, params, afb_req_subcall_catch_events, GlueRqtPromiseCb, (void*)thread);
+            break;
+        default:
+            afb_api_call(GlueGetApi(glue), apiname, verbname, nparams, params, GlueApiPromiseCb, (void*)thread);
+    }
+    return promiseN;
+
+OnErrorExit:
+    GLUE_AFB_ERROR(afbMain, "code=%s error=%s", errorCode, errorMsg);
+    napi_throw_error(env, errorCode, errorMsg);
+    GLUE_RETURN_NULL;
+}
+
 static napi_value GlueCallSync(napi_env env, napi_callback_info info)
 {
-    const char *errorCode="internal-error", *errorMsg= "syntax: callsync(handle, api, verb, ...)";
+    const char *errorCode="internal-error", *errorMsg= "syntax: callsync(handle, api, verb, ...args)";
     napi_status statusN;
     json_object *valueJ;
     int status, err, count=0;
@@ -1627,6 +1665,7 @@ static napi_value NapiGlueInit(napi_env env, napi_value exports) {
     {"reply"         , NULL, GlueRespond       , NULL, NULL, NULL, napi_default, NULL },
     {"exit"          , NULL, GlueExit          , NULL, NULL, NULL, napi_default, NULL },
     {"setloa"        , NULL, GlueSetLoa        , NULL, NULL, NULL, napi_default, NULL },
+    {"subcall"       , NULL, GlueCallPromise   , NULL, NULL, NULL, napi_default, NULL },
     {"callasync"     , NULL, GlueCallAsync     , NULL, NULL, NULL, napi_default, NULL },
     {"callsync"      , NULL, GlueCallSync      , NULL, NULL, NULL, napi_default, NULL },
     {"replyable"     , NULL, GlueIsReplyable   , NULL, NULL, NULL, napi_default, NULL },
@@ -1642,7 +1681,6 @@ static napi_value NapiGlueInit(napi_env env, napi_value exports) {
     {"jobcancel"     , NULL, GlueJobCancel     , NULL, NULL, NULL, napi_default, NULL },
     {"jobkill"       , NULL, GlueJobKill       , NULL, NULL, NULL, napi_default, NULL },
     {"jobstart"      , NULL, GlueJobStart      , NULL, NULL, NULL, napi_default, NULL },
-    {"jobstatus"     , NULL, GlueJobStatus     , NULL, NULL, NULL, napi_default, NULL },
     {"getuid"        , NULL, GlueGetUid        , NULL, NULL, NULL, napi_default, NULL },
     // promisses pour les call async
 

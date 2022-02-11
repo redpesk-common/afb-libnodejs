@@ -9,8 +9,8 @@ object:
     - imports helloworld-event binding and api
     - call helloworld-event/startTimer to activate binding timer (1 event per second)
     - call helloworld-event/subscribe to subscribe to event
-    - lock mainloop with EventGet5Test and register the eventHandler (EventReceiveCB) with mainloop lock
-    - finally (EventReceiveCB) count 5 events and release the mainloop lock received from EventGet5Test
+    - lock mainloop with EvtGet5Events and register the eventHandler (EventReceiveCB) with mainloop lock
+    - finally (EventReceiveCB) count 5 events and release the mainloop lock received from EvtGet5Events
 
 usage
     - from dev tree: LD_LIBRARY_PATH=../afb-libglue/build/src/ lua samples/test-api.lua
@@ -21,11 +21,12 @@ config: following should match your installation paths
     - nodejsPATH='/my-node-module-path' (to _afbnodeglue.so)
     - LD_LIBRARY_PATH='/my-glulib-path' (to libafb-glue.so
 */
+'use strict';
 
 // find and import libafb module
 process.env.NODE_PATH='./build/src';
 require("module").Module._initPaths();
-var libafb=require('afbnodeglue');
+const libafb=require('afbnodeglue');
 
 // static variables
 global.evtCount=0
@@ -58,63 +59,38 @@ function EventReceiveCB(evt, name, ctx, ...data) {
     }
 }
 
-
-function StartEventTimer(job, userdata) {
+function EvtStartTimer(job, userdata) {
     var response= libafb.callsync(job, "helloworld-event", "startTimer")
     if (response.status != 0) libafb.notice  (job, "helloworld event-timer fail status=%d", status)
     return response.status
 }
 
-function EventSubscribe(job, userdata) {
+function EvtSubscribe(job, userdata) {
     var response= libafb.callsync(job, "helloworld-event", "subscribe")
     if (response.status != 0) libafb.notice  (job, "helloworld subscribe-event fail status=%d", status)
     return response.status
 }
 
-function EventUnSubscribe(job, userdata) {
+function EvtUnSubscribe(job, userdata) {
     var response= libafb.callsync(job, "helloworld-event", "unsubscribe")
     if (response.status != 0) libafb.notice  (job, "helloworld unsubscribe-event fail status=%d", status)
     return response.status
 }
 
 // register an event handler that count 5 event before releasing current job from mainloop
-function EventGet5Test(job, userdata) {
-    var ctx= {
-        'job': job,
-        'count': userdata
-    }
-    var evt= libafb.evthandler(job, {'uid':'timer-event', 'pattern':'helloworld-event/timerCount','callback':EventReceiveCB}, ctx)
-
-    return (evt != null) // onerror if evt==null
-}
-
-// Minimalist test framework demo
-var myTestCase = [
-    {'callback':StartEventTimer, 'userdata':null, 'expect':0,    'info': 'start helloworld binding timer'},
-    {'callback':EventSubscribe , 'userdata':null, 'expect':0,    'info': 'subscribe to helloworld event'},
-    {'callback':EventGet5Test  , 'userdata':5   , 'expect':true, 'info': 'wait for 5 helloworld event'},
-]
-
-// executed when binder and all api/interfaces are ready to serv
-function jobstartCB(job) {
+function EvtGet5Events(job, timeout, userdata) {
     var status=0
-    var timeout=4 // seconds
-    libafb.notice(job, "startTestCB=[%s]", libafb.config(job, "uid"))
 
-    for(var idx in myTestCase) {
-        var test= myTestCase[idx];
-        libafb.info(job, "starting test[%s] callback=[%s] info=[%s]", idx, test.callback.name, test.info)
-        var result= test.callback (job, test.userdata)
-        if (result != test.expect) {
-            status= -1;
-            break;
-        }
-    }
+    // add job handle to userdata
+    userdata.job= job
 
-    libafb.notice (job, "jobstartCB return status=%d", status)
-    return(status) // force jobkill  
+    // register eventhandle passing job and count as userdata
+    var evt= libafb.evthandler(job, {'uid':'timer-event', 'pattern':'helloworld-event/timerCount','callback':EventReceiveCB}, userdata)
+
+    // onerror if evt==null
+    if (evt === null) status=-1
+    return (status)
 }
-
 
 // helloworld binding sample functioninition
 var EventBinding = {
@@ -138,14 +114,30 @@ var binderOpts = {
 var binder= libafb.binder(binderOpts)
 var hello = libafb.binding(EventBinding)
 
-// start async operation
-libafb.jobstart(binder, jobstartCB, 100, null)
-    .then  (job => {libafb.info (job, "jobstart-1 Done: status=%d"  , libafb.jobstatus(job))})
-    .catch (job => {libafb.error(job, "jobstart-1 Abort: status=%d" , libafb.jobstatus(job))})
-    .finally(() => {
-        EventUnSubscribe (binder, null)
+// loop synchronously on test list
+function jobRunTest(binder, testlist, idx) {
+    var test= testlist[idx];
+
+    if (!test) {
         libafb.notice(binder, '---- Test Done -----');
         process.exit(0)
-    });
+    }
 
+    libafb.info(binder, "==> Starting [%s] info=[%s]", test.callback.name, test.info)
+    libafb.jobstart(binder,  test.callback, test.timeout, test.userdata)
+    .then  (status => {libafb.info (binder, "--> [%s] Success: status=%d" , test.callback.name, status)})
+    .catch (status => {libafb.error(binder, "--> [%s] Fail: status=%d" , test.callback.name, status)})
+    .finally(()    => {jobRunTest(binder, testlist, idx+1)})
+}
+
+// Minimalist test framework demo
+var mytestlist = [
+    {'callback':EvtStartTimer ,'timeout': 0,'userdata':null, 'expect':0, 'info': 'start helloworld binding timer'},
+    {'callback':EvtSubscribe  ,'timeout': 0,'userdata':null, 'expect':0, 'info': 'subscribe to helloworld event'},
+    {'callback':EvtGet5Events ,'timeout':10,'userdata':{'count':5}, 'expect':true, 'info': 'wait for 5 helloworld event'},
+    {'callback':EvtUnSubscribe,'timeout': 0,'userdata':null, 'expect':0, 'info': 'subscribe to helloworld event'},
+    null // sentinel
+]
+// launch test scenario
+jobRunTest(binder, mytestlist, 0)
 console.log ("### nodejs running ###")

@@ -24,15 +24,26 @@
 #include <node_api.h>
 #include <wrap-json.h>
 
+#include "js_native_api_types.h"
 #include "node-afb.h"
 #include "node-utils.h"
 
 #include <glue-afb.h>
 #include <glue-utils.h>
 
+typedef struct {
+    GlueHandleT *glue;
+    afb_data_t const *args;
+    unsigned argc;
+    GlueCtxThreadT thread;
+} GlueCtxDeferredT;
+
 void GlueTimerCb (afb_timer_x4_t timer, void *userdata, int decount);
 void GlueApiSubcallCb(void *userdata, int status, unsigned nreplies, afb_data_t const replies[], afb_api_t api);
 void GlueRqtSubcallCb(void *userdata, int status, unsigned nreplies, afb_data_t const replies[], afb_req_t req);
+void GlueApiPromiseCb(void *userdata, int status, unsigned nreplies, afb_data_t const replies[], afb_api_t api);
+void GlueRqtPromiseCb(void *userdata, int status, unsigned nreplies, afb_data_t const replies[], afb_req_t req);
+napi_value GluePromiseStartCb(napi_env env, GlueCtxThreadT *thread);
 void GlueEventCb(void *userdata, const char *event_name,	unsigned nparams, afb_data_x4_t const params[],	afb_api_t api);
 void GlueInfoCb(afb_req_t afbRqt, unsigned nparams, afb_data_t const params[]);
 int  GlueStartupCb(void *config, void *userdata);
