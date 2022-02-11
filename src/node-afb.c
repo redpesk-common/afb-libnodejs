@@ -79,7 +79,7 @@ static napi_value  GluePrintDebug(napi_env env, napi_callback_info info) {
 
 static napi_value GlueEvtPush(napi_env env, napi_callback_info info)
 {
-    const char *errorCode="internal-error", *errorMsg = "syntax: eventpush(eventid, [arg1 ... argn])";
+    const char *errorCode="internal-error", *errorMsg = "syntax: eventpush(evtid, [arg1 ... argn])";
     napi_status statusN;
     json_object *valueJ;
     int  count=0;
@@ -134,7 +134,7 @@ OnErrorExit:
 
 static napi_value GlueEvtSubscribe(napi_env env, napi_callback_info info)
 {
-    const char *errorCode="internal-error", *errorMsg = "syntax: subscribe(rqt, eventid)";
+    const char *errorCode="internal-error", *errorMsg = "syntax: subscribe(rqt, evtid)";
     napi_status statusN;
     afb_event_t evtid;
 
@@ -180,7 +180,7 @@ OnErrorExit:
 
 static napi_value GlueEvtUnsubscribe(napi_env env, napi_callback_info info)
 {
-    const char *errorCode="internal-error", *errorMsg = "syntax: unsubscribe(rqt, eventid)";
+    const char *errorCode="internal-error", *errorMsg = "syntax: unsubscribe(rqt, evtid)";
     napi_status statusN;
     afb_event_t evtid;
 
@@ -226,7 +226,7 @@ OnErrorExit:
 
 static napi_value GlueEvtNew(napi_env env, napi_callback_info info)
 {
-    const char *errorCode="internal-error", *errorMsg = "syntax: eventid= eventnew(api,label)";
+    const char *errorCode="internal-error", *errorMsg = "syntax: evtid= eventnew(api,label)";
     napi_status statusN;
     afb_event_t evtid;
 
@@ -256,7 +256,7 @@ static napi_value GlueEvtNew(napi_env env, napi_callback_info info)
         goto OnErrorExit;
     }
 
-    int err= afb_api_new_event(glue->api.afb, label, &evtid);
+    int err= afb_api_new_event(GlueGetApi(glue), label, &evtid);
     if (err)
     {
         errorMsg = "afb-api-new-event-fail";
