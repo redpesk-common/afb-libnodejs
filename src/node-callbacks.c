@@ -105,6 +105,9 @@ void GlueFreeHandleCb(napi_env env, GlueHandleT *handle) {
         case GLUE_API_MAGIC:    // as today removing API is not supported bu libafb
         case GLUE_RQT_MAGIC:    // rqt live cycle is handle directly by libafb
         case GLUE_BINDER_MAGIC: // afbmain should never be released
+            handle->usage=1; // static handle
+            break;
+
         default:
             goto OnErrorExit;
     }
